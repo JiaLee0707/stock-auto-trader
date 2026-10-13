@@ -44,19 +44,23 @@ stock-auto-trader/
 ├── main.py                     # Main trading bot
 ├── config.py                   # Configuration management
 ├── state.py                    # State tracking
-├── kis_overseas.py              # KIS API integration (Phase 1)
-├── kis_domestic.py              # Domestic ETF API (Phase 2)
-├── ai_analyzer.py              # AI market analysis
-├── trader.py                   # Core trading logic
-├── trading_strategy.py          # Advanced trading strategies
-├── utils.py                     # Utility functions
-├── token_cache.json            # API token cache
-├── logs/                        # Execution logs
+├── kis_overseas.py              # KIS 해외주식 API
+├── kis_domestic.py              # 국내 ETF API (Phase 2 스켈레톤)
+├── ai_analyzer.py              # Gemini 시장 분석
+├── trader.py                   # 핵심 매매 로직
+├── trading_strategy.py          # 확장 전략 (현재 미사용)
+├── utils.py                     # 유틸리티 (현재 미사용)
+├── .python-version             # Python 3.12.15 고정
+├── token_cache_mock.json       # 모의투자 토큰 캐시
+├── token_cache_real.json       # 실전투자 토큰 캐시
+├── logs/                        # 실행 로그
 │   └── bot.log                 # Trading bot logs
-├── README.md                   # Project documentation
-├── README_FINAL.md             # Technical specifications
-├── DEVELOPMENT-GUIDE.md        # Development guide
-├── project_summary.md          # Project summary
+├── README.md                   # 프로젝트 문서
+├── TRADING_BOT_README.md       # 빠른 실행 가이드
+├── DEVELOPMENT-GUIDE.md        # 개발 가이드
+├── TROUBLESHOOTING.md          # 문제 해결 가이드
+├── run_instructions.md         # 실행 안내
+├── project_summary.md          # 프로젝트 요약
 └── CLAUDE.md                   # This configuration file
 ```
 
@@ -271,13 +275,17 @@ class TestTradingBot:
 
 ### Environment Variables
 ```env
-# KIS API Authentication
-KIS_APP_KEY=your_kis_app_key
-KIS_APP_SECRET=your_kis_app_secret
-KIS_ACCOUNT_NO=XXXXXXXX-XX
-
 # Trading Mode
 IS_MOCK_TRADING=True  # Set to False for real trading
+
+# KIS API Authentication (모의/실전 분리 권장, 단일 KIS_APP_KEY도 fallback)
+KIS_MOCK_APP_KEY=your_mock_app_key
+KIS_MOCK_APP_SECRET=your_mock_app_secret
+KIS_MOCK_ACCOUNT_NO=XXXXXXXX-XX
+KIS_REAL_APP_KEY=your_real_app_key
+KIS_REAL_APP_SECRET=your_real_app_secret
+KIS_REAL_ACCOUNT_NO=XXXXXXXX-XX
+# KIS_APP_KEY / KIS_APP_SECRET / KIS_ACCOUNT_NO  (공통 fallback)
 
 # Gemini AI
 GEMINI_API_KEY=your_gemini_api_key

@@ -21,23 +21,27 @@ stock-auto-trader/
 ├── kis_domestic.py             # Domestic ETF API (Phase 2)
 ├── ai_analyzer.py              # AI market analysis
 ├── trader.py                   # Core trading logic
-├── trading_strategy.py          # Advanced trading strategies
-├── utils.py                     # Utility functions
-├── token_cache.json            # API token cache
+├── trading_strategy.py          # Advanced trading strategies (미사용)
+├── utils.py                     # Utility functions (미사용)
+├── token_cache_mock.json        # API token cache (모의투자)
+├── token_cache_real.json        # API token cache (실전투자)
 ├── logs/                        # Execution logs
 │   └── bot.log                 # Trading bot logs
 ├── README.md                   # Project documentation
-└── README_FINAL.md             # Technical specifications
+├── TRADING_BOT_README.md       # 빠른 실행 가이드
+├── TROUBLESHOOTING.md          # 문제 해결 가이드
+├── run_instructions.md         # 실행 안내
+└── project_summary.md          # 프로젝트 요약
 ```
 
 ## 시작하기
 
 ### 필수 조건
 
-1. **Python 3.8+**
+1. **Python 3.12+** (프로젝트는 3.12.15에서 개발·운영, `.python-version` 참조)
    ```bash
    $ python3 --version
-   Python 3.14.0
+   Python 3.12.15
    ```
 
 2. **Git 설치**
@@ -79,7 +83,10 @@ $ pip install --upgrade pip
 $ pip install -r requirements.txt
 
 # 설치 확인
-$ pip list | grep -E "(requests|schedule|google-generativeai)"
+$ pip list | grep -E "(requests|schedule|google-genai)"
+
+# 패키지 추가 설치 후 requirements.txt 갱신
+$ pip freeze > requirements.txt
 ```
 
 ### 개발 워크플로우
@@ -99,13 +106,16 @@ $ git commit -m "Initial commit - project structure"
 #### 2. 환경 설정 구성
 `.env` 파일 편집:
 ```env
-# KIS API 인증
-KIS_APP_KEY=your_app_key_here
-KIS_APP_SECRET=your_app_secret_here
-KIS_ACCOUNT_NO=XXXXXXXX-XX
-
 # 거래 모드
 IS_MOCK_TRADING=True  # 실제 거래 시 False로 설정
+
+# KIS API 인증 (모의/실전 분리 권장, 단일 KIS_APP_KEY도 fallback 동작)
+KIS_MOCK_APP_KEY=your_mock_app_key
+KIS_MOCK_APP_SECRET=your_mock_app_secret
+KIS_MOCK_ACCOUNT_NO=XXXXXXXX-XX
+KIS_REAL_APP_KEY=your_real_app_key
+KIS_REAL_APP_SECRET=your_real_app_secret
+KIS_REAL_ACCOUNT_NO=XXXXXXXX-XX
 
 # Gemini AI
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -222,29 +232,22 @@ class BotState:
 - 주문 실행
 - 오류 처리
 
-**개발 워크플로우**:
+**개발 워크플로우** (실제 구현은 모듈 레벨 함수 방식):
 ```python
 import requests
-import json
-from datetime import datetime, timedelta
-from pathlib import Path
+import config
 
-class KISOverseasAPI:
-    def __init__(self):
-        self.base_url = "https://openapi.koreainvestment.com:9443"
-        self.token_cache = Path("token_cache.json")
-    
-    def get_access_token(self):
-        # 토큰 검색 구현
-        pass
-    
-    def get_current_price(self, ticker):
-        # 가격 검색 구현
-        pass
-    
-    def buy_fractional(self, krw_amount):
-        # 분수 거래 구현
-        pass
+def get_access_token() -> str:
+    # 토큰 캐시 파일(config.TOKEN_CACHE_FILE) 우선 사용, 만료 시 재발급
+    ...
+
+def get_current_price(ticker: str) -> float:
+    # /uapi/overseas-price/v1/quotations/price 조회
+    ...
+
+def buy_shares(quantity: int, price_usd: float) -> dict:
+    # /uapi/overseas-stock/v1/trading/order (지정가, 정수 수량)
+    ...
 ```
 
 #### ai_analyzer.py
@@ -256,28 +259,37 @@ class KISOverseasAPI:
 - 감정 점수 (-100에서 +100)
 - 오류 처리 및 대체 로직
 
-**개발 워크플로우**:
+**개발 워크플로우** (실제 구현은 `google-genai` SDK 사용):
 ```python
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import json
-from datetime import date
 
-class AIAnalyzer:
-    def __init__(self, api_key):
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel("gemini-1.5-flash")
-    
-    def analyze_market_sentiment(self):
-        # 감정 분석 구현
-        pass
+import config
+
+_client = genai.Client(api_key=config.GEMINI_API_KEY)
+
+def analyze_market_sentiment() -> dict:
+    response = _client.models.generate_content(
+        model="gemini-3.1-flash-lite",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.2,
+            response_mime_type="application/json",
+        ),
+    )
+    # JSON 파싱 실패 시 {"score": 0, "reason": "..."} 반환
+    ...
 ```
 
 ### 2. 테스트 및 검증
 
+> 이 프로젝트에는 아직 자동화된 테스트 코드(`tests/`, pytest)가 없습니다. 아래 항목은 수동 검증 절차와 향후 테스트 작성 템플릿입니다.
+
 #### 구문 확인
 ```bash
 # 포괄적인 구문 확인
-python3 -m py_compile *.py *.pyc
+python3 -m py_compile *.py
 
 # 개별 파일 확인
 python3 -m py_compile config.py
@@ -478,21 +490,21 @@ class ErrorMonitor:
 
 ### 1. 국내 ETF 통합 (kis_domestic.py)
 
-#### 구현 단계
+현재 이 모듈은 인터페이스만 정의되어 있고 모든 함수가 `NotImplementedError`를 발생시킵니다.
+
+#### 구현할 인터페이스
 ```python
-# 1. 국내 ETF 모듈 구조 정의
-class KISDomesticAPI:
-    def __init__(self, config):
-        self.config = config
-        self.base_url = "https://openapi.koreainvestment.com:9443"
-    
-    def get_domestic_price(self, ticker):
-        # 국내 가격 검색 구현
-        pass
-    
-    def buy_domestic(self, ticker, quantity):
-        # 국내 거래 구현
-        pass
+def get_domestic_price(ticker: str) -> float:
+    """국내 ETF 현재가 조회."""
+    ...
+
+def buy_domestic(ticker: str, quantity: int) -> dict:
+    """국내 ETF 매수."""
+    ...
+
+def sell_domestic_all(ticker: str, quantity: int) -> dict:
+    """국내 ETF 전량 매도."""
+    ...
 ```
 
 #### 설정 업데이트
@@ -863,7 +875,6 @@ print(f'Gemini API 키 설정: {bool(os.getenv(\"GEMINI_API_KEY\"))}')
 
 ---
 
-*문서 버전: 1.0.0*
-*마지막 업데이트: 2025-01-02*
+*문서 버전: 1.1.0*
+*마지막 업데이트: 2026-10-13*
 *작성자: Claude Code 구현*
-*연락처: 교육 목적 전용*

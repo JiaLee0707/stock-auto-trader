@@ -7,18 +7,20 @@
 ## 사전 요구 사항
 
 ### 1. Python 환경
-- Python 3.8+ (3.14.0에서 테스트됨)
-- 선택 사항: 가상 환경 (`.venv`) 권장
+- Python 3.12+ (3.12.15에서 개발·운영)
+- 가상 환경 (`.venv`) 사용 필수
 
 ### 2. 필요한 패키지
 다음 패키지가 필요합니다 (`requirements.txt`에 명시됨):
 
 ```txt
-requests==2.32.3
-python-dotenv==1.0.1
+requests==2.34.2
+python-dotenv==1.2.4
 schedule==1.2.2
-google-generativeai==0.7.2
+google-genai==2.30.0
 ```
+
+패키지를 추가로 설치한 뒤에는 `.venv/bin/python -m pip freeze > requirements.txt`로 목록을 갱신하세요.
 
 ## 빠른 시작 단계
 
@@ -45,7 +47,7 @@ pip install -r requirements.txt
 #### 옵션 B: 전역 설치 (권장하지 않음)
 ```bash
 cd /Users/jia/Documents/project/stock-auto-trader
-pip install requests python-dotenv schedule google-generativeai
+pip install requests python-dotenv schedule google-genai
 ```
 
 ### 2단계: 환경 설정
@@ -247,9 +249,12 @@ python main.py
 | 변수 | 설명 | 기본값 | 필수 |
 |----------|-------------|---------|----------|
 | `IS_MOCK_TRADING` | 모의 거래 활성화/비활성화 | `True` | 아니오 |
-| `KIS_APP_KEY` | KIS API 키 | `None` | 예 |
-| `KIS_APP_SECRET` | KIS API 시크릿 | `None` | 예 |
-| `KIS_ACCOUNT_NO` | KIS 계좌번호 | `None` | 예 |
+| `KIS_APP_KEY` | KIS API 키 (모의/실전 공통 fallback) | `None` | 예 |
+| `KIS_APP_SECRET` | KIS API 시크릿 (공통 fallback) | `None` | 예 |
+| `KIS_ACCOUNT_NO` | KIS 계좌번호 (공통 fallback) | `None` | 예 |
+| `KIS_MOCK_APP_KEY` / `KIS_REAL_APP_KEY` | 모드별 API 키 (있으면 우선) | `None` | 아니오 |
+| `KIS_MOCK_APP_SECRET` / `KIS_REAL_APP_SECRET` | 모드별 API 시크릿 | `None` | 아니오 |
+| `KIS_MOCK_ACCOUNT_NO` / `KIS_REAL_ACCOUNT_NO` | 모드별 계좌번호 | `None` | 아니오 |
 | `GEMINI_API_KEY` | Gemini API 키 | `None` | 예 |
 | `TARGET_TICKER` | 거래 대상 티커 | `QQQ` | 아니오 |
 | `BUY_RATIO` | 거래당 포트폴리오 배분 비율 | `0.30` | 아니오 |
@@ -271,7 +276,7 @@ pip install -r requirements.txt
 **해결책**:
 1. KIS API 키와 시크릿이 올바른지 확인하세요
 2. KIS 계좌에 적절한 권한이 있는지 확인하세요
-3. KIS 계좌가 분수 주식 거래를 지원하는지 확인하세요
+3. KIS 해외주식 주문 권한과 계좌번호(`XXXXXXXX-XX`) 형식이 올바른지 확인하세요
 
 ### 오류: 잘못된 Gemini API 키
 **문제**: Gemini API 인증 실패
@@ -403,6 +408,6 @@ pkill -f "python main.py" && python main.py
 
 ---
 
-*문서 버전: 1.0.0*
-*마지막 업데이트: 2025-01-02*
+*문서 버전: 1.1.0*
+*마지막 업데이트: 2026-10-13*
 *작성자: Claude Code 구현*

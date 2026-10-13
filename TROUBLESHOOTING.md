@@ -45,12 +45,12 @@ pip install -r requirements.txt
 #### 옵션 B: 전역 설치 (권장하지 않음)
 ```bash
 cd /Users/jia/Documents/project/stock-auto-trader
-pip install requests python-dotenv schedule google-generativeai
+pip install requests python-dotenv schedule google-genai
 ```
 
 **확인:**
 ```bash
-python3 -c "import requests, schedule, google.generativeai, dotenv; print('All packages installed successfully')"
+python3 -c "import requests, schedule, google.genai, dotenv; print('All packages installed successfully')"
 ```
 
 ### 문제 2: .env 파일이 없거나 잘못됨
@@ -143,7 +143,7 @@ source .env/bin/activate
 **증상:**
 ```
 ModuleNotFoundError: No module named 'schedule'
-ModuleNotFoundError: No module named 'google-generativeai'
+ModuleNotFoundError: No module named 'google-genai'
 ```
 
 **해결책:**
@@ -160,7 +160,7 @@ pip install -r requirements.txt
 **전역 Python을 사용하는 경우:**
 ```bash
 cd /Users/jia/Documents/project/stock-auto-trader
-pip install requests python-dotenv schedule google-generativeai
+pip install requests python-dotenv schedule google-genai
 ```
 
 ### 문제 5: 임포트 오류
@@ -176,7 +176,8 @@ ModuleNotFoundError: No module named 'xyz'
 #### 5.1 Python 버전 확인
 ```bash
 python3 --version
-# Should be Python 3.8 or higher
+# Python 3.12 이상 필요 (프로젝트는 3.12.15에서 개발·운영)
+# 이 프로젝트는 .venv 사용을 전제로 하므로 .venv/bin/python --version 으로 확인
 ```
 
 #### 5.2 기본 임포트 테스트

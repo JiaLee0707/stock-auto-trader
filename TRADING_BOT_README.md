@@ -5,7 +5,7 @@
 이 봇은 AI 기반 시장 심리 분석과 원칙 기반의 매매 규칙을 결합하여 나스닥 주식(QQQ 등) 매매를 자동화합니다.
 
 ### 사전 요구사항
-- Python 3.8 이상 설치
+- Python 3.12 이상 설치 (3.12.15에서 개발·운영)
 - 인터넷 연결
 - Git
 
@@ -25,6 +25,9 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 ```bash
 pip install --upgrade pip
 pip install -r requirements.txt
+
+# 새 패키지를 설치한 뒤에는 requirements.txt 갱신
+.venv/bin/python -m pip freeze > requirements.txt
 ```
 
 ### 4단계: 환경 설정 (선택 사항이지만 권장)
@@ -125,21 +128,21 @@ AI_SCORE_FLOOR=-50                # 매수를 위한 최소 AI 시장 심리 점
 ## 🔧 주요 기능
 
 ### 🤖 AI 시장 분석
-- **Gemini 1.5 Flash**: 일일 시장 뉴스 및 심리 분석
+- **Gemini** (`gemini-3.1-flash-lite`): 일일 시장 뉴스 및 심리 분석
 - **감정 점수 산정**: -100(극단적 약세) ~ +100(극단적 강세)
 - **스마트 매매 필터링**: AI 심리 점수가 양호할 때만 매수 진입
 
 ### 📈 자동 매매
 - **매수 조건**: 가격 하락(Dip) + AI 심리 점수 기준 충족 + 당일 매수 이력 없음
-- **매도 조건**: 목표 수익률 도달 (익절 5%) 또는 손절 조건 도달
-- **소수점 매매**: 가용 자금 비율에 따른 소수점 주식 매수 지원
+- **매도 조건**: 목표 수익률 도달 시 전량 익절 (기본 5%)
+- **정수 수량 매수**: 총자산의 30% 예산 내에서 주문 수량 계산 (KIS 지정가 주문)
 - **리스크 관리**: 1회 포지션 크기 제한 및 일일 매수 제한
 
 ### 🛡️ 안전 장치
 - **모의투자 모드**: 실자본 투입 전 가상 매매 테스트
 - **오류 복구**: 네트워크/API 장애 발생 시 자동 예외 처리 및 복구
 - **일일 제한**: 1개 종목당 하루 1회만 매수
-- **수량 제한**: 최소/최대 포지션 크기 제어
+- **수량 제한**: 예산이 1주 가격보다 작으면 매수하지 않음 (최소/최대 포지션 상한은 미구현)
 
 ## 📋 매매 로직
 
@@ -149,8 +152,8 @@ AI_SCORE_FLOOR=-50                # 매수를 위한 최소 AI 시장 심리 점
 3. **당일 매수 제한**: 오늘 아직 매수하지 않은 상태
 
 ### 매도 조건:
-- **익절**: 수익률 ≥ TAKE_PROFIT_THRESHOLD (+5.0% 이상)
-- **손절**: 수익률 ≤ DIP_THRESHOLD (설정에 따름)
+- **익절**: 수익률 ≥ TAKE_PROFIT_THRESHOLD (+5.0% 이상) → 전량 매도
+- **손절**: 미구현 (Phase 2 로드맵 항목)
 
 ## 📁 프로젝트 구조
 
@@ -169,13 +172,16 @@ stock-auto-trader/
 ├── kis_domestic.py              # 국내 ETF API (Phase 2 예정)
 ├── ai_analyzer.py              # Gemini AI 시장 분석
 ├── trader.py                   # 핵심 매매 실행 로직
-├── trading_strategy.py          # 확장 매매 전략
-├── utils.py                     # 유틸리티 함수
-├── token_cache.json            # API 접근 토큰 캐시
+├── trading_strategy.py          # 확장 매매 전략 (현재 미사용)
+├── utils.py                     # 유틸리티 함수 (현재 미사용)
+├── token_cache_mock.json       # 모의투자 토큰 캐시
+├── token_cache_real.json       # 실전투자 토큰 캐시
 ├── logs/                        # 실행 로그 디렉터리
 │   └── bot.log                 # 봇 실행 로그 파일
 ├── README.md                   # 프로젝트 전체 문서
+├── TRADING_BOT_README.md       # 빠른 설정 및 실행 가이드
 ├── DEVELOPMENT-GUIDE.md        # 개발 가이드
+├── TROUBLESHOOTING.md          # 문제 해결 가이드
 ├── project_summary.md           # 프로젝트 요약 보고서
 └── run_instructions.md         # 상세 실행 가이드
 ```
@@ -312,9 +318,10 @@ grep "buy\|sell" logs/bot.log | tail -5
 ## 📞 도움말 얻기
 
 ### 문서
-- 본 README.md 파일
-- README_FINAL.md (기술적 세부사항)
+- README.md (프로젝트 전체 문서)
 - DEVELOPMENT-GUIDE.md (개발 프로세스)
+- TROUBLESHOOTING.md (문제 해결)
+- run_instructions.md (실행 안내)
 - project_summary.md (프로젝트 개요)
 
 ### 지원
@@ -325,7 +332,7 @@ grep "buy\|sell" logs/bot.log | tail -5
 
 ---
 
-**참고**: 본 시스템은 교육 목적으로 제작되었습니다. 실전 자본 투입 전 반드시 모의투자 환경에서 충분히 검증하세요. 투자 결정 전 재무 전문가와 상담하세요.
+**참고**: 처음 도입 시에는 모의투자 환경에서 충분히 검증한 뒤 실전으로 전환하세요.
 
-**마지막 업데이트**: 2025-01-02
-**버전**: 1.0.0
+**마지막 업데이트**: 2026-10-13
+**버전**: 1.1.0

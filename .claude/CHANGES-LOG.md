@@ -1,5 +1,32 @@
 # Change Log - Nasdaq Snowball Auto-Trading Bot
 
+## Version 1.1.0 - 문서 정정 및 의존성 정리 (2026-10-13)
+
+### Purpose
+문서가 실제 코드와 어긋난 부분을 정정하고, `requirements.txt`를 실제 사용 패키지에 맞게 갱신.
+
+### Documentation Corrections
+- ✅ **용도 문구 삭제**: "교육 목적" 등 시스템 용도를 규정하는 문장 제거 (README, TRADING_BOT_README, project_summary, DEVELOPMENT-GUIDE)
+- ✅ **Gemini 모델명 정정**: `Gemini 1.5 Flash` → `gemini-3.1-flash-lite`, SDK `google-generativeai` → `google-genai`
+- ✅ **주문 방식 정정**: "분수/소수점 주식 거래" → 정수 수량 지정가 매수 (`buy_shares`)
+- ✅ **손절 표기 정정**: 손절 조건은 미구현이며 Phase 2 로드맵 항목임을 명시
+- ✅ **모듈 수 정정**: "9+ 전문 모듈" → 실행 경로 7개 모듈 + 확장용 3개
+- ✅ **미사용 모듈 표기**: `trading_strategy.py`, `utils.py`는 현재 실행 경로에서 미사용
+- ✅ **환경 변수 정정**: `KIS_MOCK_*` / `KIS_REAL_*` 분리 키와 `KIS_APP_KEY` fallback 동작 반영
+- ✅ **토큰 캐시 파일명 정정**: `token_cache.json` → `token_cache_mock.json` / `token_cache_real.json`
+- ✅ **Python 버전 정정**: `3.8+` / `3.14.0` → `3.12.15` (`.python-version`)
+- ✅ **삭제된 파일 참조 제거**: `README_FINAL.md`, `final/README_FINAL.md`
+- ✅ **KIS 엔드포인트 정정**: 매수도 `/trading/order` 사용 (`order-resv` 아님), 환율은 두나무 API
+
+### Dependency Changes
+- ✅ **`google-genai==2.30.0` 추가**: `ai_analyzer.py`가 사용하는 신규 SDK
+- ✅ **`google-generativeai==0.8.6` 제거**: 구 SDK, 코드에서 미사용
+- ✅ **전이 의존성 정리**: 구 SDK 전용 패키지(`google-api-python-client`, `grpcio-status`, `proto-plus`, `tqdm`, `httplib2`, `uritemplate`, `pyparsing`, `googleapis-common-protos`, `google-ai-generativelanguage`, `google-api-core`, `google-auth-httplib2`) 제거 — 40개 → 27개
+
+### Added Documentation
+- ✅ **`TROUBLESHOOTING.md`**, **`run_instructions.md`**, **`TRADING_BOT_README.md`** 항목을 구조도 및 문서 목록에 반영
+- ✅ **`requirements.txt` 갱신 절차 안내**: `.venv/bin/python -m pip freeze > requirements.txt`
+
 ## Version 1.0.0 - Initial Implementation (2025-01-02)
 
 ### Major Features Implemented
