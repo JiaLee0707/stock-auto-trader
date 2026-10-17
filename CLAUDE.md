@@ -1,482 +1,68 @@
-# Claude Code Configuration - Nasdaq Snowball Auto-Trading Bot
+# CLAUDE.md — KIS 자동매매 봇 공통 규칙 (모든 작업에 적용)
 
-This document contains configuration and guidelines for Claude Code operations on the Nasdaq Snowball Auto-Trading Bot project.
+## 프로젝트 성격
+한국투자증권(KIS) OpenAPI로 ETF를 자동매매하는 Python 3.12 봇. macOS 로컬 실행, `schedule`로 1시간 주기.
+**최종 목적은 실제 자금(20만원) 운용**이다. 최우선 가치는 "수익"이 아니라 "**잘못된 주문이 나가지 않는 것**".
+현재는 모의투자(가상 1,000만원) 단계다.
 
-## Project Overview
+## 절대 규칙 (위반 금지)
+1. **실전 주문이 나갈 수 있는 코드를 실행하지 않는다.** 개발·테스트는 항상 `TRADING_MODE=paper`. 실전 모드는 `CONFIRM_LIVE=YES_I_UNDERSTAND` 환경변수가 없으면 시작 즉시 종료해야 한다. (T01에서 구현)
+2. **`.env`, API 키, 토큰, 계좌번호를 출력·로그·커밋하지 않는다.** 로그의 계좌번호는 마스킹(`****1234`).
+3. **주문(매수/매도/취소) API는 절대 자동 재시도하지 않는다.** 재시도는 읽기 전용 조회에만 허용. (타임아웃 후 재시도 = 중복 주문)
+4. **KIS API의 엔드포인트/TR_ID/파라미터를 추측하지 않는다.** 기존 코드의 것을 우선 따르고, 새로 필요한 것은 공식 문서·공식 GitHub 샘플(`koreainvestment/open-trading-api`)로 확인한다. 확인 불가하면 구현하지 말고 `NotImplementedError` + TODO로 두고 "확인 필요"로 보고한다. 모의/실전 TR_ID가 다름에 주의.
+5. **수치(수수료율, 세율, 임계값)는 하드코딩하지 않고 `config.py` 설정값으로** 둔다. 근거가 불확실하면 `# VERIFY:` 주석. 전략 수치는 **모두 검증 전 가설**이다.
+6. 모르는 것·판단이 필요한 것은 **추측으로 구현하지 말고** 작업 보고서에 질문으로 남긴다.
+7. `try/except: pass` 금지. 모든 예외는 로그 + 상태 반영.
+8. 요청 범위 밖의 대규모 리팩터링, 불필요한 의존성 추가 금지. 새 의존성은 이유를 보고서에 적는다.
+9. 시간은 항상 tz-aware (`Asia/Seoul`, 미국은 `America/New_York`). naive datetime 금지.
+10. 백테스트 성능을 높이려고 임계값을 반복 조정하거나, 신호가 없다고 조건을 임의로 완화하지 않는다. 사실은 그대로 보고한다.
 
-The Nasdaq Snowball Auto-Trading Bot is a comprehensive automated trading system for Nasdaq stocks with AI-powered market sentiment analysis.
+## 작업 방식
+- 한 번에 **지정된 Task 하나만** 수행한다. 다음 Task의 기능을 미리 만들지 않는다.
+- 시작 전 `git status`가 깨끗한지 확인, 브랜치 `improve/tNN-짧은이름`에서 작업.
+- 변경마다 테스트(`pytest`)를 작성·실행하고, 통과한 상태로만 커밋한다.
+- 기존 공개 함수 시그니처는 가능하면 유지한다. 바꾸면 보고서에 명시한다.
+- 작업 종료 시 `docs/CHANGES.md`에 아래 형식으로 **추가**(덮어쓰기 금지)한다:
+  1. Task 번호/이름, 완료 여부(완료/부분/미완료+이유)
+  2. 변경 파일과 핵심 요약
+  3. 테스트 결과 요약
+  4. 확인하지 못한 항목 (`# VERIFY` 목록)
+  5. 사용자가 결정해야 할 질문
+  6. 다음 Task에 영향을 주는 사항
 
-## Claude Code Configuration
+## 우선순위 충돌 시
+안전성(주문·상태·킬스위치) > 판단 로직 일관성 > 검증 > 편의.
 
-### Session Settings
-- **Current Working Directory**: `/Users/jia/Documents/project/stock-auto-trader`
-- **Primary Language**: Python 3.12.15 (pyenv)
-- **Virtual Environment**: `.venv` (created)
-- **Project Status**: ✅ COMPLETE - All core modules implemented
-
-### Available Development Commands
-
-```python
-# Configuration commands
-setup: Initialize project and install dependencies
-source .venv/bin/activate && pip install -r requirements.txt
-
-run: Start the trading bot
-python main.py
-
-test: Test Python syntax and basic functionality
-python3 -m py_compile *.py && echo 'Syntax check passed'
-
-logs: Show recent bot logs
-tail -20 logs/bot.log 2>/dev/null || echo 'No logs found'
+## 모듈 구조 (현재, 코드와 다르면 T01에서 보고)
+```
+config.py         설정 (env 로드, 모의/실전 도메인·TR_ID 분기)
+state.py          런타임 상태 (당일 매수 횟수·시각, 익절 단계; 날짜 바뀌면 리셋)
+indicators.py     RSI(Wilder), 볼린저밴드 직접 구현
+kis_overseas.py   KIS 해외주식 API (토큰캐시, 시세·일봉·잔고·주문, _request 래퍼)
+kis_domestic.py   KIS 국내주식 API (시세·일봉·잔고·주문가능금·주문)
+ai_analyzer.py    Gemini로 시장 심리 점수(-100~100) 산출
+trader.py         매매 판단·실행 (해외/국내 공통 _run_cycle)
+main.py           schedule 1시간 주기, 정규장 시간 체크
 ```
 
-## Project Structure
-
-```
-stock-auto-trader/
-├── .claude/                    # Claude-specific configurations
-│   ├── commands.py             # Command definitions
-│   └── CHANGES-LOG.md          # Version control
-├── .env                        # Environment configuration
-├── .gitignore                  # Git ignore patterns
-├── requirements.txt            # Python dependencies
-├── main.py                     # Main trading bot
-├── config.py                   # Configuration management
-├── state.py                    # State tracking
-├── kis_overseas.py              # KIS 해외주식 API
-├── indicators.py               # 보조지표 (RSI + 볼린저밴드)
-├── kis_domestic.py              # KIS 국내주식 API (해외와 동시 운용)
-├── ai_analyzer.py              # Gemini 시장 분석
-├── trader.py                   # 핵심 매매 로직
-├── trading_strategy.py          # 확장 전략 (현재 미사용)
-├── utils.py                     # 유틸리티 (현재 미사용)
-├── .python-version             # Python 3.12.15 고정
-├── token_cache_mock.json       # 모의투자 토큰 캐시
-├── token_cache_real.json       # 실전투자 토큰 캐시
-├── logs/                        # 실행 로그
-│   └── bot.log                 # Trading bot logs
-├── README.md                   # 프로젝트 문서
-├── TRADING_BOT_README.md       # 빠른 실행 가이드
-├── DEVELOPMENT-GUIDE.md        # 개발 가이드
-├── TROUBLESHOOTING.md          # 문제 해결 가이드
-├── run_instructions.md         # 실행 안내
-├── project_summary.md          # 프로젝트 요약
-└── CLAUDE.md                   # This configuration file
-```
-
-## Development Workflow
-
-### 1. Initial Setup
-```bash
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up environment
-cp .env.example .env  # If .env.example exists
-chmod 600 .env
-```
-
-### 2. Basic Testing
-```bash
-# Syntax check
-python3 -m py_compile *.py
-
-# Import test
-python3 -c "
-import config, state, kis_overseas, ai_analyzer, trader, main
-print('All imports successful!')
-print(f'Mock trading: {config.IS_MOCK}')
-print(f'Target ticker: {config.TARGET_TICKER}')
-"
-```
-
-### 3. Development Commands
-Use the Claude Code commands to:
-
-1. **Setup**: Initialize project and dependencies
-2. **Run**: Start the trading bot
-3. **Test**: Validate syntax
-4. **Logs**: Monitor execution
-
-## Module Development Guide
-
-### Core Modules
-
-#### config.py
-**Purpose**: Configuration management
-**Key Features**:
-- Environment variable loading
-- Mock/real trading mode switching
-- API endpoint configuration
-- Trading parameter validation
-
-**Development Pattern**:
-```python
-# Import required modules
-import os
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
-# Set up configuration
-IS_MOCK = os.getenv("IS_MOCK_TRADING", "True").lower() == "true"
-```
-
-#### state.py
-**Purpose**: Daily state management
-**Key Features**:
-- Singleton pattern implementation
-- Daily buy flag tracking
-- Automatic date-based reset
-- Thread-safe operations
-
-**Development Pattern**:
-```python
-from datetime import date
-
-class BotState:
-    def __init__(self):
-        self._bought_today = False
-        self._flag_date = date.today()
-    
-    def _check_date_reset(self):
-        # Implement daily reset logic
-        pass
-    
-    @property
-    def bought_today(self):
-        # Get with automatic reset
-        pass
-```
-
-#### kis_overseas.py
-**Purpose**: KIS API integration
-**Key Features**:
-- Token management and caching
-- Market data retrieval
-- Order execution
-- Error handling
-
-**Development Pattern**:
-```python
-import requests
-import json
-from datetime import datetime, timedelta
-from pathlib import Path
-
-class KISOverseasAPI:
-    def __init__(self):
-        self.base_url = config.KIS_BASE_URL
-        self.token_cache = Path(config.TOKEN_CACHE_FILE)
-    
-    def get_access_token(self):
-        # Token retrieval with caching
-        pass
-```
-
-### Advanced Modules
-
-#### ai_analyzer.py
-**Purpose**: AI market sentiment analysis
-**Key Features**:
-- Gemini API integration
-- JSON response parsing
-- Sentiment scoring (-100 to +100)
-- Fallback logic
-
-#### trading_strategy.py
-**Purpose**: Advanced trading strategies
-**Key Features**:
-- Asset management
-- Position sizing
-- Risk metrics
-- Signal generation
-
-## Error Handling Patterns
-
-### Network Error Handling
-```python
-def safe_api_call(func, *args, **kwargs):
-    try:
-        return func(*args, **kwargs)
-    except ConnectionError as e:
-        logger.warning(f"Network error: {e}")
-        return None
-    except TimeoutError as e:
-        logger.warning(f"Timeout error: {e}")
-        return None
-```
-
-### API Error Handling
-```python
-def handle_api_error(response):
-    if response.status_code == 401:
-        logger.error("Authentication failed")
-        # Refresh token logic
-    elif response.status_code == 429:
-        logger.warning("Rate limit exceeded")
-        # Wait and retry
-    else:
-        logger.error(f"API error: {response.status_code}")
-```
-
-## Testing & Validation
-
-### Syntax Testing
-```bash
-python3 -m py_compile *.py
-```
-
-### Integration Testing
-```python
-import pytest
-from unittest.mock import Mock, patch
-
-class TestTradingBot:
-    def test_buy_conditions(self):
-        # Test buy signal generation
-        pass
-    
-    def test_sell_conditions(self):
-        # Test sell signal generation
-        pass
-    
-    def test_error_recovery(self):
-        # Test error handling
-        pass
-```
-
-## Development Best Practices
-
-### 1. Code Quality
-- **Documentation**: Comprehensive docstrings
-- **Type Hints**: Use type annotations
-- **Error Handling**: Implement try-catch blocks
-- **Logging**: Use structured logging
-
-### 2. Performance Optimization
-- **Efficient Scheduling**: Use appropriate sleep intervals
-- **Memory Management**: Regular garbage collection
-- **API Rate Limiting**: Built-in delays
-- **Connection Reuse**: Reuse HTTP connections
-
-### 3. Security Practices
-- **Environment Variables**: Store API keys in `.env`
-- **File Permissions**: Set appropriate permissions
-- **Input Validation**: Validate all inputs
-- **Error Messages**: Avoid sensitive data exposure
-
-## Configuration Management
-
-### Environment Variables
-```env
-# Trading Mode
-IS_MOCK_TRADING=True  # Set to False for real trading
-
-# KIS API Authentication (모의/실전 분리 권장, 단일 KIS_APP_KEY도 fallback)
-KIS_MOCK_APP_KEY=your_mock_app_key
-KIS_MOCK_APP_SECRET=your_mock_app_secret
-KIS_MOCK_ACCOUNT_NO=XXXXXXXX-XX
-KIS_REAL_APP_KEY=your_real_app_key
-KIS_REAL_APP_SECRET=your_real_app_secret
-KIS_REAL_ACCOUNT_NO=XXXXXXXX-XX
-# KIS_APP_KEY / KIS_APP_SECRET / KIS_ACCOUNT_NO  (공통 fallback)
-
-# Gemini AI
-GEMINI_API_KEY=your_gemini_api_key
-
-# Investment Target (해외 주식)
-TARGET_TICKER=QQQ
-TARGET_TICKER_NAME=Invesco QQQ Trust
-
-# Investment Target (국내 ETF, 해외와 동시 운용)
-IS_DOMESTIC_ENABLED=True
-DOMESTIC_TICKER=379800
-DOMESTIC_TICKER_NAME=TIGER 미국나스닥100
-
-# Trading Parameters
-BUY_RATIO=0.30            # 해외 매수 비중
-DOMESTIC_BUY_RATIO=0.20   # 국내 매수 비중
-DIP_THRESHOLD=-1.5
-TAKE_PROFIT_THRESHOLD=5.0
-AI_SCORE_FLOOR=-50
-```
-
-### Configuration Files
-- **`.env`**: Environment variables (never commit to git)
-- **`requirements.txt`**: Python dependencies
-- **`.gitignore`**: Git ignore patterns
-
-## Phase 2 Roadmap
-
-### Immediate Enhancements
-
-#### 1. Advanced Risk Management
-- **Stop-Loss**: Dynamic stop-loss implementation
-- **Position Sizing**: Advanced algorithms
-- **Portfolio Rebalancing**: Asset allocation
-
-#### 2. Performance Analytics
-- **Detailed Logging**: Complete trade history
-- **Performance Metrics**: Analytics and reporting
-- **Automated Reports**: Scheduled summaries
-
-### Future Features
-- **Multi-Asset Support**: Crypto, commodities
-- **Alert System**: SMS/email notifications
-- **Paper Trading**: Risk-free testing
-- **Backtesting**: Historical validation
-
-## Deployment Instructions
-
-### Quick Start
-```bash
-# 1. Setup project
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# 2. Configure environment
-# Edit .env with your API keys
-
-# 3. Test syntax
-python3 -m py_compile *.py
-
-# 4. Run bot
-python main.py
-
-# 5. Monitor logs
-tail -f logs/bot.log
-```
-
-### Production Commands
-```bash
-# Start bot
-source .venv/bin/activate
-python main.py
-
-# Monitor system resources
-free -h          # Memory
-uf -h            # Disk space
-ps aux | grep python  # Python processes
-
-# Graceful shutdown
-Ctrl+C in terminal
-```
-
-## Troubleshooting
-
-### Common Issues and Solutions
-
-#### Issue 1: Module Not Found
-**Problem**: "ModuleNotFoundError: No module named 'requests'"
-**Solution**:
-```bash
-pip install -r requirements.txt
-```
-
-#### Issue 2: API Key Configuration
-**Problem**: Environment variables not found
-**Solution**:
-```bash
-cat .env
-chmod 600 .env
-```
-
-#### Issue 3: Trading Logic Errors
-**Problem**: Buy/sell conditions not met
-**Solution**:
-```bash
-python3 -c "import config; print('Configuration:', config.__dict__)"
-```
-
-## Version Control
-
-### Git Configuration
-```bash
-# Set up git user
-git config --global user.name "Developer Name"
-git config --global user.email "developer@example.com"
-
-# Initialize project
-git init
-git add .
-git commit -m "Initial commit - project structure"
-```
-
-### Commit Message Guidelines
-```commit
-<type>(<scope>): <description>
-
-<base62-sha> <message>
-
-Co-authored-by: Claude Code <noreply@anthropic.com>
-```
-
-### Branch Strategy
-- **Main Branch**: Production-ready code
-- **Feature Branches**: Development features
-- **Hotfix Branches**: Urgent fixes
-
-## Monitoring & Maintenance
-
-### Log Monitoring
-```bash
-# Real-time log monitoring
-tail -f logs/bot.log
-
-# Recent errors
-grep "ERROR" logs/bot.log | tail -10
-
-# Trading activity summary
-grep "buy\|sell" logs/bot.log | tail -5
-```
-
-### Resource Monitoring
-```bash
-# Memory usage
-free -h
-
-# Disk space
-df -h
-
-# Python process
-ps aux | grep python
-```
-
-## References
-
-### Documentation Sources
-- [KIS API Documentation](https://apiportal.koreainvestment.com/apis)
-- [Gemini API Documentation](https://ai.google.dev/api)
-- [Python Schedule Documentation](https://pypi.org/project/schedule/)
-
-### Development Tools
-- **IDE**: VS Code with Python extension
-- **Linter**: flake8, black, isort
-- **Type Checker**: mypy
-- **Testing**: pytest, unittest
-
-## Conclusion
-
-This Claude Code configuration provides comprehensive guidelines for developing the Nasdaq Snowball Auto-Trading Bot. The project is structured with clear patterns for each module and follows best practices for production-ready software.
-
-**Key Achievements**:
-- ✅ All core modules implemented
-- ✅ Comprehensive error handling
-- ✅ Production-ready architecture
-- ✅ Complete documentation
-- ✅ Testing framework ready
-
-**Current Status**: Production ready with clear pathways for future enhancements.
-
----
-
-*Document Version: 1.0.0*
-*Last Updated: 2025-01-02*
-*Configuration Author: Claude Code*
+## 현재 알려진 문제 (개선 작업의 근거)
+- 모의투자 4일간 **매도 체결 0건** — 익절/손절이 한 번도 실제 발동한 적 없음
+- 주문 후 `rt_cd=="0"`(접수)만 확인, 체결가·수량 미확인, 미체결 추적/취소 없음
+- 상태가 메모리 기반이라 재시작 시 소실, 브로커 잔고와 대조 안 함
+- 부분 익절(1/3씩)이 소액(1~4주)에서 `max(1,…)` 때문에 첫 단계 전량 청산됨
+- 손절 -5% / 익절 +2% 비대칭 (손익분기 승률 약 71%)
+- 20만원에서 비중 10% 규칙 → 1주(약 2.3만원)도 못 사는 경우 발생
+- "장시작전/장종료" 거부 다수 (휴장일·장 시간 처리 부정확)
+- 백테스트와 실전 판단 로직이 별개일 가능성
+- AI 점수가 수익을 개선한다는 검증 없음
+
+## 전략 기본값 (가설 — config 기본값으로만 사용, T11 결과로 확정)
+| 항목 | 기본값 |
+|---|---|
+| 진입 필터 | 종가 > SMA(200) |
+| 진입 신호 | RSI(14) ≤ 35 AND 종가 ≤ BB 하단(20, 2σ) |
+| 청산 | +3% / -3% / 최대 7거래일 |
+| 동시 보유 | 최대 2종목 |
+| 하루 신규 매수 | 최대 1건 |
+| 1회 위험 | 자산의 1% |
+| 유니버스 | 국내 상장 ETF 5~10종, 1주 3만원 이하, 레버리지/인버스 제외 (`config/universe.yaml`) |
