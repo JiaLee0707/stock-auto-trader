@@ -48,10 +48,59 @@ if not GEMINI_API_KEY and not IS_MOCK:
 TARGET_TICKER      = os.getenv("TARGET_TICKER", "QQQ")
 TARGET_TICKER_NAME = os.getenv("TARGET_TICKER_NAME", "QQQ")
 
-BUY_RATIO              = float(os.getenv("BUY_RATIO", "0.30"))
+# 해외주식 운용 여부. QQQ는 1주에 약 98만원이라 소액 자본에서는 매수가 불가능하다.
+# 1회 매수 예산(BUY_RATIO × 총자산)이 1주 가격보다 작으면 주문이 계속 스킵된다.
+# 실전투자(소액)는 기본값 False — 국내 ETF만 운용한다. 모의투자는 그대로 True.
+_overseas_default = "False" if not IS_MOCK else "True"
+IS_OVERSEAS_ENABLED   = os.getenv("IS_OVERSEAS_ENABLED", _overseas_default).lower() == "true"
+
+# 국내 ETF (해외와 동시 운용)
+IS_DOMESTIC_ENABLED   = os.getenv("IS_DOMESTIC_ENABLED", "True").lower() == "true"
+DOMESTIC_TICKER       = os.getenv("DOMESTIC_TICKER", "379800")   # TIGER 미국나스닥100
+DOMESTIC_TICKER_NAME  = os.getenv("DOMESTIC_TICKER_NAME", "TIGER 미국나스닥100")
+
+# AI 분석용 뉴스 수집 (RSS, 콤마 구분으로 교체 가능)
+NEWS_FEEDS = [
+    u.strip() for u in os.getenv(
+        "NEWS_FEEDS",
+        "https://news.google.com/rss/search?q=nasdaq+stock+market&hl=en-US&gl=US&ceid=US:en,"
+        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=QQQ&region=US&lang=en-US",
+    ).split(",") if u.strip()
+]
+NEWS_MAX_ITEMS   = int(os.getenv("NEWS_MAX_ITEMS", "10"))
+NEWS_TIMEOUT_SEC = float(os.getenv("NEWS_TIMEOUT_SEC", "8"))
+
+# 1회 매수 비중 (다회 매수 전제). 하루 최대 노출 = 이 값 × MAX_BUYS_PER_DAY
+# 균형 프로필: 해외 15% × 2회 = 30%, 국내 10% × 2회 = 20%
+BUY_RATIO              = float(os.getenv("BUY_RATIO", "0.15"))
+DOMESTIC_BUY_RATIO     = float(os.getenv("DOMESTIC_BUY_RATIO", "0.10"))
 DIP_THRESHOLD          = float(os.getenv("DIP_THRESHOLD", "-1.5"))
+
+# ── 보조지표 (RSI + 볼린저밴드, 눌림목 매매) ──────────────
+USE_INDICATORS         = os.getenv("USE_INDICATORS", "True").lower() == "true"
+RSI_PERIOD             = int(os.getenv("RSI_PERIOD", "14"))
+RSI_OVERSOLD           = float(os.getenv("RSI_OVERSOLD", "30"))     # 이하면 매수 후보
+RSI_OVERBOUGHT         = float(os.getenv("RSI_OVERBOUGHT", "70"))   # 이상이면 매도 후보
+BB_PERIOD              = int(os.getenv("BB_PERIOD", "20"))
+BB_NUM_STD             = float(os.getenv("BB_NUM_STD", "2.0"))
 TAKE_PROFIT_THRESHOLD  = float(os.getenv("TAKE_PROFIT_THRESHOLD", "5.0"))
 AI_SCORE_FLOOR         = int(os.getenv("AI_SCORE_FLOOR", "-50"))
+
+# ── 스노우볼 전략 (균형 프로필) ──────────────────────────
+# 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)
+MAX_BUYS_PER_DAY       = int(os.getenv("MAX_BUYS_PER_DAY", "2"))
+MIN_BUY_INTERVAL_HOURS = float(os.getenv("MIN_BUY_INTERVAL_HOURS", "2.0"))
+
+# 부분 익절: (수익률 %, 매도 비중 %) 단계. 마지막 단계는 남은 수량 전량 매도.
+# 예: (2.0, 33) → +2% 도달 시 보유의 약 1/3 매도
+TAKE_PROFIT_STEPS = [
+    tuple(float(v) for v in item.split(":"))
+    for item in os.getenv("TAKE_PROFIT_STEPS", "2.0:33,4.0:33,6.0:100").split(",")
+    if item.strip()
+]
+
+# 손절: 수익률이 이 값 이하로 떨어지면 전량 매도 (0 이하 = 비활성)
+STOP_LOSS_THRESHOLD    = float(os.getenv("STOP_LOSS_THRESHOLD", "-5.0"))
 
 # 모의/실전 토큰 캐시 충돌 방지
 TOKEN_CACHE_FILE = "token_cache_mock.json" if IS_MOCK else "token_cache_real.json"

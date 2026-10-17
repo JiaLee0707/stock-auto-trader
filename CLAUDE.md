@@ -45,7 +45,8 @@ stock-auto-trader/
 ├── config.py                   # Configuration management
 ├── state.py                    # State tracking
 ├── kis_overseas.py              # KIS 해외주식 API
-├── kis_domestic.py              # 국내 ETF API (Phase 2 스켈레톤)
+├── indicators.py               # 보조지표 (RSI + 볼린저밴드)
+├── kis_domestic.py              # KIS 국내주식 API (해외와 동시 운용)
 ├── ai_analyzer.py              # Gemini 시장 분석
 ├── trader.py                   # 핵심 매매 로직
 ├── trading_strategy.py          # 확장 전략 (현재 미사용)
@@ -290,12 +291,18 @@ KIS_REAL_ACCOUNT_NO=XXXXXXXX-XX
 # Gemini AI
 GEMINI_API_KEY=your_gemini_api_key
 
-# Investment Target
+# Investment Target (해외 주식)
 TARGET_TICKER=QQQ
 TARGET_TICKER_NAME=Invesco QQQ Trust
 
+# Investment Target (국내 ETF, 해외와 동시 운용)
+IS_DOMESTIC_ENABLED=True
+DOMESTIC_TICKER=379800
+DOMESTIC_TICKER_NAME=TIGER 미국나스닥100
+
 # Trading Parameters
-BUY_RATIO=0.30
+BUY_RATIO=0.30            # 해외 매수 비중
+DOMESTIC_BUY_RATIO=0.20   # 국내 매수 비중
 DIP_THRESHOLD=-1.5
 TAKE_PROFIT_THRESHOLD=5.0
 AI_SCORE_FLOOR=-50
@@ -310,17 +317,12 @@ AI_SCORE_FLOOR=-50
 
 ### Immediate Enhancements
 
-#### 1. Domestic ETF Support
-- **Implementation**: Complete `kis_domestic.py`
-- **Targets**: TIGER 미국나스닥100 (379800)
-- **Features**: Domestic market trading
-
-#### 2. Advanced Risk Management
+#### 1. Advanced Risk Management
 - **Stop-Loss**: Dynamic stop-loss implementation
 - **Position Sizing**: Advanced algorithms
 - **Portfolio Rebalancing**: Asset allocation
 
-#### 3. Performance Analytics
+#### 2. Performance Analytics
 - **Detailed Logging**: Complete trade history
 - **Performance Metrics**: Analytics and reporting
 - **Automated Reports**: Scheduled summaries

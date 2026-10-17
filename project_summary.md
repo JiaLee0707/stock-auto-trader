@@ -104,7 +104,7 @@ def job():
 #### **7. 지원 모듈**
 - **trading_strategy.py**: 고급 거래 전략 (현재 실행 경로에서 미사용)
 - **utils.py**: 유틸리티 함수 (로깅, 검증, 수학) — 현재 미사용
-- **kis_domestic.py**: 국내 ETF 지원 (Phase 2 스켈레톤, `NotImplementedError`)
+- **kis_domestic.py**: KIS 국내주식 API 지원 (구현 완료, 해외와 동시 운용)
 - **TRADING_BOT_README.md**: 빠른 설정 및 실행 가이드
 - **DEVELOPMENT-GUIDE.md**: 전체 개발 가이드
 - **TROUBLESHOOTING.md**: 문제 해결 가이드
@@ -169,9 +169,10 @@ def should_buy(price_drop_pct: float, ai_score: int, bought_today: bool) -> bool
 #### Phase 1: 핵심 거래 시스템
 - [x] **config.py**: 설정 로드 및 관리
 - [x] **state.py**: 자동 리셋을 포함한 일별 상태 관리
-- [x] **kis_overseas.py**: 완전한 KIS API 통합
+- [x] **kis_overseas.py**: 완전한 KIS API 통합 (통합증거금 반영, _request 래퍼로 초당 호출 제한 대응)
+- [x] **kis_domestic.py**: KIS 국내주식 API 통합 (해외와 동시 운용)
 - [x] **ai_analyzer.py**: Gemini 기반 시장 분석
-- [x] **trader.py**: 핵심 거래 로직 구현
+- [x] **trader.py**: 해외·국내 매매 로직 구현
 - [x] **main.py**: 오류 복구를 포함한 시간별 스케줄러
 
 #### Phase 2: 개발 인프라
@@ -184,20 +185,20 @@ def should_buy(price_drop_pct: float, ai_score: int, bought_today: bool) -> bool
 #### Phase 3: 고급 기능 (작성만 완료, 실행 경로 미연결)
 - [x] **trading_strategy.py**: 고급 거래 전략
 - [x] **utils.py**: 유틸리티 함수 및 검증
-- [x] **kis_domestic.py**: 국내 ETF 지원 스켈레톤
 - [x] **TROUBLESHOOTING.md / run_instructions.md**: 운영 문서
 
 ### 📊 구현 지표
 
 | 모듈 | 코드 라인 수 | 복잡도 | 자동 테스트 |
 |--------|---------------|------------|----------------|
-| config.py | 57 | 낮음 | 없음 (구문 검사만) |
-| state.py | 30 | 낮음 | 없음 (구문 검사만) |
-| kis_overseas.py | 293 | 중간 | 없음 (구문 검사만) |
+| config.py | 63 | 낮음 | 없음 (구문 검사만) |
+| state.py | 46 | 낮음 | 없음 (구문 검사만) |
+| kis_overseas.py | 364 | 중간 | 없음 (구문 검사만) |
+| kis_domestic.py | 200 | 중간 | 없음 (구문 검사만) |
 | ai_analyzer.py | 93 | 중간 | 없음 (구문 검사만) |
-| trader.py | 96 | 중간 | 없음 (구문 검사만) |
-| main.py | 132 | 낮음 | 없음 (구문 검사만) |
-| **합계** | **701** | **중간** | **테스트 코드 없음** |
+| trader.py | 196 | 중간 | 없음 (구문 검사만) |
+| main.py | 192 | 낮음 | 없음 (구문 검사만) |
+| **합계** | **1,154** | **중간** | **테스트 코드 없음** |
 
 > 자동화된 테스트는 아직 없습니다. 검증은 `python3 -m py_compile *.py` 구문 검사와 모의투자 실행으로만 이루어집니다.
 
@@ -212,10 +213,17 @@ KIS_ACCOUNT_NO: XXXXXXXXXX-XX
 IS_MOCK_TRADING: true  # Start with mock for testing
 GEMINI_API_KEY: your_gemini_api_key_here
 
-# Trading Configuration
+# Trading Configuration (해외)
 TARGET_TICKER: QQQ
 TARGET_TICKER_NAME: Invesco QQQ Trust
-BUY_RATIO: 0.30              # 30% of portfolio per trade
+
+# Trading Configuration (국내 ETF)
+IS_DOMESTIC_ENABLED: true
+DOMESTIC_TICKER: 379800
+DOMESTIC_TICKER_NAME: TIGER 미국나스닥100
+
+BUY_RATIO: 0.30              # 해외 매수 비중 (30%)
+DOMESTIC_BUY_RATIO: 0.20     # 국내 매수 비중 (20%)
 DIP_THRESHOLD: -1.5          # 1.5% price drop trigger
 TAKE_PROFIT_THRESHOLD: 5.0   # 5% profit target
 AI_SCORE_FLOOR: -50          # Minimum AI score
@@ -236,12 +244,18 @@ AI_SCORE_FLOOR: -50          # Minimum AI score
 
 ### API 통합
 
-#### KIS API 엔드포인트
+#### KIS API 엔드포인트 (해외)
 - `/oauth2/tokenP`: 토큰 관리 (24시간 캐시)
 - `/uapi/overseas-price/v1/quotations/price`: 현재가
 - `/uapi/overseas-stock/v1/trading/inquire-balance`: 포트폴리오 잔고
-- `/uapi/overseas-stock/v1/trading/order`: 매수 주문 (지정가)
-- `/uapi/overseas-stock/v1/trading/order`: 매도 주문
+- `/uapi/overseas-stock/v1/trading/order`: 매수·매도 주문 (지정가)
+- `/uapi/overseas-price/v1/quotations/inquire-daily-chartprice`: 환율 (FX@KRW)
+
+#### KIS API 엔드포인트 (국내)
+- `/uapi/domestic-stock/v1/quotations/inquire-price`: 현재가
+- `/uapi/domestic-stock/v1/trading/inquire-balance`: 잔고 (원화 예수금 포함)
+- `/uapi/domestic-stock/v1/trading/inquire-psbl-order`: 주문가능금액
+- `/uapi/domestic-stock/v1/trading/order-cash`: 매수·매도 주문 (지정가)
 
 #### Gemini API 통합
 - **모델**: `gemini-3.1-flash-lite` (google-genai SDK)
@@ -253,22 +267,17 @@ AI_SCORE_FLOOR: -50          # Minimum AI score
 
 ### 즉시 다음 단계 (향후 개선 사항)
 
-#### 1. 국내 ETF 통합
-- **구현**: 완전한 기능의 `kis_domestic.py`
-- **대상**: TIGER 미국나스닥100 (379800)
-- **기능**: KIS API를 사용한 국내 시장 거래
-
-#### 2. 향상된 위험 관리
+#### 1. 향상된 위험 관리
 - **손절매**: 동적 손절매 구현
 - **포지션 크기 조정**: 고급 알고리즘 (켈리 기준)
 - **포트폴리오 재조정**: 자산 배분 유지
 
-#### 3. 성과 분석
+#### 2. 성과 분석
 - **상세 로깅**: 전체 거래 이력
 - **성과 지표**: 승률, 평균 수익률
 - **자동 보고서**: 일일/주간 성과 요약
 
-#### 4. 추가 기능
+#### 3. 추가 기능
 - **다중 자산 지원**: QQQ 외 자산 (암호화폐, 원자재)
 - **알림 시스템**: SMS/이메일 알림
 - **모의 거래**: 위험 없는 테스트 환경
@@ -398,15 +407,16 @@ print(f'✓ Mock trading: {os.getenv(\"IS_MOCK_TRADING\")}')
 
 1. **모듈식 아키텍처**: 실행 경로 6개 모듈 + 확장용 3개 모듈
 2. **AI 통합**: Gemini 기반 시장 감정 분석
-3. **실거래 역량**: KIS 해외주식 API를 통한 실계좌 주문 (지정가, 정수 수량)
+3. **실거래 역량**: KIS 해외주식·국내주식 API를 통한 실계좌 주문 (지정가, 정수 수량)
 4. **위험 관리**: 익절·일일 매수 제한·예수금 한도 (손절은 미구현)
 5. **오류 복원력**: 모든 장애 모드의 우아한 처리
 6. **프로덕션 기능**: 완전한 설정 및 로깅
+7. **동시 운용**: 해외(QQQ 30%)와 국내 ETF(379800 20%)를 각각 독립적으로 판단·주문
 
-이 시스템은 국내 ETF 지원과 고급 거래 전략을 포함한 Phase 2 배포가 가능한 상태입니다. 핵심 기능은 구현되었으나 자동화된 테스트는 아직 없으며, 모의투자 검증 후 실전 전환을 권장합니다.
+핵심 기능은 구현되었으나 자동화된 테스트는 아직 없으며, 모의투자 검증 후 실전 전환을 권장합니다.
 
 **상태**: ⚠️ **모의투자 검증 단계** - 핵심 모듈 구현 완료, 자동화 테스트 미작성
-**다음 버전**: 2.0.0 (Phase 2 - 국내 ETF 지원)
+**다음 버전**: 2.0.0 (고급 리스크 관리·성과 분석)
 
 ---
 

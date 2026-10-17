@@ -28,9 +28,17 @@
 - **스케줄 통합**: 자동화된 시간별 거래 주기
 - **상태 관리**: 일별 매수 플래그와 자동 날짜 기반 리셋
 
-### 🎯 포지션 관리
+### 🎯 포지션 관리 (스노우볼 전략)
 - **정수 수량 매수**: KIS 해외주식 현금 매수 주문 (`ORD_DVSN=00` 지정가)
-- **동적 포지션 크기 조정**: 총자산의 `BUY_RATIO`(30%), 예수금의 99% 한도 내
+- **진입 타점 (보조지표)**: `RSI(14) ≤ 30` **이고** 종가가 볼린저 하단(20, 2σ) 이하일 때만 매수
+  → 하락 추세에서 무작정 물타기하지 않고 과매도 확인 후 진입
+- **청산 타점 (보조지표)**: `RSI(14) ≥ 70` **이고** 종가가 볼린저 상단 이상이면 익절 단계 1회 실행
+  → 단, **수익 중일 때만** 동작하고 한 번에 한 단계만 매도
+- **분할 매수**: 총자산의 해외 15% / 국내 10%씩, 종목당 하루 최대 `MAX_BUYS_PER_DAY`(2)회
+  → 하루 최대 노출 해외 30% / 국내 20%, 평단 대비 `DIP_THRESHOLD` 하락 시마다 추가 매수
+- **부분 익절**: `TAKE_PROFIT_STEPS`(기본 +2% 1/3, +4% 1/3, +6% 전량) 단계별 분할 매도
+  → 급등으로 여러 단계를 건너뛰면 도달한 단계를 한 번에 모두 실행
+- **손절**: `STOP_LOSS_THRESHOLD`(기본 -5%) 이하 시 전량 매도 (0 이하 설정 시 비활성)
 - **위험 제한**: 1주 가격보다 예산이 작으면 매수하지 않음
 
 ## 시스템 아키텍처
@@ -57,9 +65,10 @@
 - **오류 처리**: 포괄적인 예외 관리
 
 #### 4. **ai_analyzer.py**
-- **Gemini API 통합**: 시장 감정 분석
+- **실데이터 수집**: KIS 실시간 시세(QQQ·379800 현재가/등락률, USD/KRW) + RSS 뉴스 헤드라인
+- **Gemini API 통합**: 수집한 데이터만을 근거로 시장 감정 분석 (날짜만 주던 방식 제거)
 - **JSON 응답 파싱**: 구조화된 감정 점수
-- **대체 로직**: 오류 시 원활한 전환
+- **재시도**: 429/503 일시 오류 시 3회 재시도, 최종 실패 시 중립(0) 처리
 - **로깅**: 상세 분석 기록
 
 #### 5. **trader.py**
@@ -88,10 +97,14 @@
 - **수학 유틸리티**: MathUtils (수량·손익 계산)
 - **시간·설정 관리**: TimeUtils, ConfigManager
 
-#### 9. **kis_domestic.py**
-- **스캐폴드**: Phase 2 확장용 (모든 함수가 `NotImplementedError`)
-- **국내 ETF**: TIGER 미국나스닥100 (379800) 등 예정
-- **플레이스홀더**: 인터페이스만 정의됨
+#### 9. **indicators.py** — 보조지표 (RSI + 볼린저밴드)
+
+#### 10. **kis_domestic.py** — 국내 ETF 매매 (구현 완료)
+- **시세·잔고**: `get_domestic_price` (원화), `get_domestic_balance`, `get_orderable_cash`
+- **주문**: `buy_domestic` / `sell_domestic_all` — 지정가(`ORD_DVSN=01`), `/trading/order-cash` 엔드포인트
+- **모의/실전 TR_ID 분기**: 매수 `VTTC0802U`/`TTTC0802U`, 매도 `VTTC0801U`/`TTTC0801U`
+- **실패 감지**: 응답 `rt_cd != 0`이면 예외 발생 (주문 실패를 성공으로 오인하지 않음)
+- **기본 대상**: TIGER 미국나스닥100 (379800)
 
 ## 기술적 사양
 
@@ -116,15 +129,42 @@ KIS_REAL_ACCOUNT_NO=XXXXXXXX-XX
 # Gemini AI
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# 투자 대상
+# AI 분석용 뉴스 수집 (RSS, 콤마로 여러 개 지정 가능)
+NEWS_FEEDS=https://news.google.com/rss/search?q=nasdaq+stock+market&hl=en-US&gl=US&ceid=US:en,https://feeds.finance.yahoo.com/rss/2.0/headline?s=QQQ&region=US&lang=en-US
+NEWS_MAX_ITEMS=10
+NEWS_TIMEOUT_SEC=8
+
+# 운용 시장 (미지정 시 모의=True, 실전=False — 실전 소액자본은 해외 비활성)
+# 실전에서 해외를 켜려면 1주 가격(QQQ 약 98만원) 이상의 1회 매수 예산이 필요
+IS_OVERSEAS_ENABLED=True
+
+# 투자 대상 (해외)
 TARGET_TICKER=QQQ
 TARGET_TICKER_NAME=Invesco QQQ Trust
 
+# 투자 대상 (국내 ETF, 해외와 동시 운용)
+IS_DOMESTIC_ENABLED=True
+DOMESTIC_TICKER=379800
+DOMESTIC_TICKER_NAME=TIGER 미국나스닥100
+
 # 거래 매개변수
-BUY_RATIO=0.30
+BUY_RATIO=0.15           # 해외 1회 매수 비중 (15% × 2회 = 하루 최대 30%)
+DOMESTIC_BUY_RATIO=0.10  # 국내 1회 매수 비중 (10% × 2회 = 하루 최대 20%)
 DIP_THRESHOLD=-1.5
-TAKE_PROFIT_THRESHOLD=5.0
 AI_SCORE_FLOOR=-50
+
+# 보조지표 (RSI + 볼린저밴드) — 매수·매도 타점
+USE_INDICATORS=True
+RSI_PERIOD=14
+RSI_OVERSOLD=30          # RSI 이하 + 볼린저 하단 이탈 → 매수
+RSI_OVERBOUGHT=70        # RSI 이상 + 볼린저 상단 돌파 → 익절 트리거
+BB_PERIOD=20
+BB_NUM_STD=2.0
+
+# 스노우볼 전략
+MAX_BUYS_PER_DAY=2
+TAKE_PROFIT_STEPS=2.0:33,4.0:33,6.0:100   # 부분 익절 (수익률%:매도비중%)
+STOP_LOSS_THRESHOLD=-5.0                  # 손절선 (%), 0 이하면 비활성
 ```
 
 `config.py`는 `IS_MOCK_TRADING` 값에 따라 KIS 도메인과 키를 자동 전환합니다.
@@ -145,14 +185,67 @@ AI_SCORE_FLOOR=-50
 - **포트폴리오 잔고**: `/uapi/overseas-stock/v1/trading/inquire-balance`
 - **원화 예수금 조회**: `/uapi/domestic-stock/v1/trading/inquire-balance` (외화 예수금이 0일 때)
 - **주문 실행**: `/uapi/overseas-stock/v1/trading/order` (매수·매도 공통)
-- **환율**: 두나무 시세 API (`quotation-api-cdn.dunamu.com`), 실패 시 1350원 기본값
+- **환율**: KIS 해외시세 환율 (`/uapi/overseas-price/v1/quotations/inquire-daily-chartprice`, `FX@KRW`), 실패 시 1350원 기본값
 
 #### Gemini API 통합
 - **모델**: `gemini-3.1-flash-lite`
 - **SDK**: `google-genai` (`genai.Client`)
+- **입력**: 실시간 시세(KIS) + RSS 뉴스 헤드라인 — 날짜만 주면 학습 시점 일반론만 반복하므로 실제 데이터를 주입
 - **응답 형식**: JSON 전용 (`response_mime_type="application/json"`)
 - **온도 (Temperature)**: 0.2 (통제된 응답)
-- **대체 로직**: 오류 발생 시 기본 중립 점수(0) 사용
+- **재시도**: 429(할당량)·503(과부하) 시 3초 간격 3회 재시도
+- **대체 로직**: 최종 실패 시 기본 중립 점수(0) 사용 — 단, 실패와 중립이 로그에서 구분됨
+
+#### 뉴스 수집 (RSS)
+- **기본 피드**: Google News(나스닥 시장), Yahoo Finance(QQQ)
+- **파싱**: 표준 라이브러리 `xml.etree.ElementTree` 사용 (추가 패키지 불필요)
+- **정렬**: 발행시각 최신순, 중복 제거 후 `NEWS_MAX_ITEMS`건만 사용
+- **실패 시**: 뉴스 없이 시세만으로 분석 (전체 분석은 계속 진행)
+
+### 모의투자 운영규정 (실전투자와 다름)
+
+아래는 한국투자증권 **모의투자** 운영규정 중 코드 동작에 영향을 주는 항목입니다. 실전투자에는 적용되지 않는 항목을 `실전` 열에 표시했습니다.
+
+#### 해외주식
+
+| 항목 | 내용 | 실전투자 | 코드 반영 |
+|------|------|----------|-----------|
+| 투자 원금 | 미국 USD 100,000 (참가신청 시 지급) | 실제 예수금 | - |
+| 통합증거금 | 국내 원화 + 외화 예수금 합산해 주문가능금 사용 | 동일 | `get_balance()`가 외화 + 국내 원화 예수금(`dnca_tot_amt`)을 **합산**해 `cash_krw` 반환 |
+| 호가 방식 | 지정가·시장가·최유리지정가·최우선지정가 (조건부지정가·IOC·FOK 미적용) | 동일 | `buy_shares()`/`sell_all()`은 지정가(`ORD_DVSN=00`)만 사용 |
+| 주문 유형 | 현금매도/매수, 현금미수만 허용 (신용·공매도 불가) | 동일 | - |
+| 예약주문 | 당일 15:40 ~ 익일 07:30 | 동일 | 미사용 |
+| 거래시간 | **정규장 주문만 체결** (시간외매매 불가) | 시간외 체결 가능 | `main.py`가 **모의투자에서만** 정규장(09:30~16:00 ET) 확인 |
+| 결제 | 3일 결제 | 동일 | - |
+| 거래정지종목 | 주문접수는 가능하나 체결되지 않음 | - | - |
+| 권리발생종목 | 액면분할·병합·감자 시 주식수 조정 전까지 매매 불가 | - | - |
+| 신규상장종목 | 최초 상장일 동시호가 시간엔 주문접수 불가 | - | - |
+
+#### 국내주식
+
+| 항목 | 내용 | 실전투자 | 코드 반영 |
+|------|------|----------|-----------|
+| 투자 원금 | 개인설정 1,000만 / 3,000만 / 5,000만 / 1억 / 5억원 | 실제 예수금 | - |
+| 투자 기간 | 개인설정 1·2·3개월 (변경 불가, 변경하려면 참가취소 후 재신청) | - | - |
+| 거래일·시간 | 실제 주식시장과 동일 적용, **시간외매매 불가** | 시간외 체결 가능 | 모의투자는 KST 09:00~15:30만 주문 (`is_domestic_market_open()`) |
+| 주문 유형 | 현금매도·현금매수·현금미수만 허용 (신용·공매도 불가) | 동일 | - |
+| 호가 방식 | 지정가·시장가·최유리지정가·최우선지정가 (조건부지정가·IOC·FOK 미적용) | 동일 | 지정가(`ORD_DVSN=01`)만 사용 |
+| 예약주문 | 당일 15:40 ~ 익일 07:30, 동시호가에 제출 | 동일 | 미사용 |
+| 투자대상종목 | 거래소·코스닥 전 종목(매매제한종목 제외), ETF/ELW/ETN | 동일 | - |
+| 매매제한종목 | 현재가 1,000원 미만, 총발행주식수 100,000주 미만, 거래정지, 실거래 없던 종목 | - | - |
+| 신규상장종목 | 최초 상장일 동시호가 시간엔 주문접수 불가 (시초가 결정 후 가능) | - | - |
+| 권리발생종목 | 대회기간 중 유·무상 및 배당 등 권리발생종목은 권리발생 금액을 현금 입금 처리. 권리락 시 보유수량 × (전일종가 − 권리락가격) 금액 보정 | - | - |
+| 반대매매 | 결제일 미수금 발생 시 시행. 미수금 발생 종목 우선 선정, 부족 시 종목코드 빠른 순. 실시간 거래량이 1주라도 발생하면 반대매매 전량 동일가 일괄매도체결 | - | - |
+| 결제 | 3일 결제 (결제순서: ELW → 코스닥종목 → 거래소종목, 각 시장 내 종목번호 빠른 순, 매도주문결제 후 매수주문결제) | 동일 | - |
+| 체결 | 동시호가 및 장중거래. 주문 제출 이후 실제 시장에서 체결된 거래량 변동분만 체결. 상한가 매수·하한가 매도 시 실제시장 총잔량 대비 체결량 비율을 적용해 주문량에 해당 비율만 체결 | 동일 | - |
+| 수수료·제세금 | 코스피: 수수료 0.0142%, 세금 0.20% (농특세 0.15% + 거래세 0.05%)<br>코스닥: 수수료 0.0142%, 세금 0.20%<br>ETF/ELW/ETN: 수수료 0.0148%, 세금 없음 | 동일 | - |
+
+**주의**
+- 위 표의 `실전` 열이 "동일"이 아닌 항목(투자원금, 거래시간)이 모의투자에서만 적용되는 규정입니다. 2026-10-13 작업에서 정규장 제한을 모드 구분 없이 넣었던 것을 모의투자 전용으로 수정했습니다.
+- **초당 거래건수 제한**: KIS 모의투자는 호출 제한이 낮아 0.5초 간격 호출 시 HTTP 500(`초당 거래건수를 초과하였습니다`)이 간헐 발생합니다. `kis_overseas._request()`가 모든 호출 전 1초 이상 간격을 보장하고 500 응답은 1.5초 후 재시도합니다.
+- 모의투자 통합증거금은 간소화 적용되어 실제 서버와 차이가 있을 수 있습니다.
+- `main.py`의 정규장 판정은 평일 여부만 확인하므로 미국 휴장일은 별도로 처리하지 않습니다. 서머타임은 ET 기준 판정이라 자동 반영됩니다.
+- 국내주식 매매는 구현되어 `run_domestic_cycle()`로 실행됩니다. 모의투자는 국내·해외 모두 정규장 주문만 체결되므로, 국내는 KST 09:00~15:30에만 주문합니다(`is_domestic_market_open()`).
 
 ### 성능 특성
 
@@ -181,7 +274,8 @@ stock-auto-trader/
 ├── config.py                   # 설정 관리
 ├── state.py                    # 당일 매수 상태 추적
 ├── kis_overseas.py             # KIS 해외주식 API
-├── kis_domestic.py             # 국내 ETF API (Phase 2 스켈레톤)
+├── indicators.py               # 보조지표 (RSI + 볼린저밴드)
+├── kis_domestic.py             # 국내 ETF API (구현 완료)
 ├── ai_analyzer.py              # Gemini 시장 분석
 ├── trader.py                   # 핵심 매매 로직
 ├── trading_strategy.py         # 확장 전략 (현재 미사용)
@@ -247,15 +341,37 @@ KIS_APP_SECRET=your_kis_app_secret
 KIS_ACCOUNT_NO=XXXXXXXX-XX
 GEMINI_API_KEY=your_gemini_api_key
 
-# 투자 대상
+# 운용 시장 (미지정 시 모의=True, 실전=False — 실전 소액자본은 해외 비활성)
+# 실전에서 해외를 켜려면 1주 가격(QQQ 약 98만원) 이상의 1회 매수 예산이 필요
+IS_OVERSEAS_ENABLED=True
+
+# 투자 대상 (해외)
 TARGET_TICKER=QQQ
 TARGET_TICKER_NAME=Invesco QQQ Trust
 
+# 투자 대상 (국내 ETF, 해외와 동시 운용)
+IS_DOMESTIC_ENABLED=True
+DOMESTIC_TICKER=379800
+DOMESTIC_TICKER_NAME=TIGER 미국나스닥100
+
 # 거래 매개변수
-BUY_RATIO=0.30
+BUY_RATIO=0.15           # 해외 1회 매수 비중 (15% × 2회 = 하루 최대 30%)
+DOMESTIC_BUY_RATIO=0.10  # 국내 1회 매수 비중 (10% × 2회 = 하루 최대 20%)
 DIP_THRESHOLD=-1.5
-TAKE_PROFIT_THRESHOLD=5.0
 AI_SCORE_FLOOR=-50
+
+# 보조지표 (RSI + 볼린저밴드) — 매수·매도 타점
+USE_INDICATORS=True
+RSI_PERIOD=14
+RSI_OVERSOLD=30          # RSI 이하 + 볼린저 하단 이탈 → 매수
+RSI_OVERBOUGHT=70        # RSI 이상 + 볼린저 상단 돌파 → 익절 트리거
+BB_PERIOD=20
+BB_NUM_STD=2.0
+
+# 스노우볼 전략
+MAX_BUYS_PER_DAY=2
+TAKE_PROFIT_STEPS=2.0:33,4.0:33,6.0:100   # 부분 익절 (수익률%:매도비중%)
+STOP_LOSS_THRESHOLD=-5.0                  # 손절선 (%), 0 이하면 비활성
 ```
 
 #### 4. 봇 실행
@@ -293,10 +409,10 @@ python main.py
 - 오류 처리
 
 #### **ai_analyzer.py** - AI 시장 분석
-- Gemini API 통합
-- 시장 감정 분석
-- JSON 응답 파싱
-- 대체 로직
+- `collect_market_snapshot()`: KIS 시세·환율 수집
+- `fetch_news_headlines()`: RSS 헤드라인 수집
+- `build_prompt()`: 수치 + 헤드라인으로 프롬프트 구성
+- `analyze_market_sentiment()`: Gemini 호출, 점수 반환
 
 #### **trader.py** - 거래 로직
 - 매수/매도 의사 결정 알고리즘
@@ -364,22 +480,17 @@ print(f'Gemini API 키 설정: {bool(os.getenv(\"GEMINI_API_KEY\"))}')
 
 ### 향후 기능
 
-#### 1. 국내 ETF 지원
-- **구현**: `kis_domestic.py` 모듈
-- **대상**: TIGER 미국나스닥100 (379800)
-- **통합**: 해외 주식과 혼합 전략
-
-#### 2. 향상된 위험 관리
+#### 1. 향상된 위험 관리
 - **손절매**: 동적 손절매 구현
 - **포지션 크기 조정**: 켈리 기준, 고정 비율 방식
 - **포트폴리오 재조정**: 자산 할당 유지
 
-#### 3. 성과 분석
+#### 2. 성과 분석
 - **상세 거래 로그**: 전체 거래 기록
 - **성과 분석**: 승리율, 평균 수익률
 - **자동 보고서**: 일일/주간 성과 요약
 
-#### 4. 추가 기능
+#### 3. 추가 기능
 - **다중 자산 지원**: QQQ 외 추가 자산
 - **알림 시스템**: SMS/이메일 알림
 - **모의 거래**: 위험 없는 테스트 환경

@@ -78,11 +78,23 @@ GEMINI_API_KEY=your_gemini_api_key_here
 TARGET_TICKER=QQQ
 TARGET_TICKER_NAME=Invesco QQQ Trust
 
+# 투자 대상 종목 (국내 ETF, 해외와 동시 운용)
+IS_DOMESTIC_ENABLED=True
+DOMESTIC_TICKER=379800
+DOMESTIC_TICKER_NAME=TIGER 미국나스닥100
+
 # 매매 파라미터
-BUY_RATIO=0.30                   # 총자산 대비 1회 매수 비율 (30%)
+# 1회 매수 비중 (다회 매수 전제). 하루 최대 노출 = 비중 × MAX_BUYS_PER_DAY
+BUY_RATIO=0.15                   # 해외 1회 매수 비중 (15% × 2회 = 하루 최대 30%)
+DOMESTIC_BUY_RATIO=0.10          # 국내 1회 매수 비중 (10% × 2회 = 하루 최대 20%)
 DIP_THRESHOLD=-1.5               # 매수 트리거 하락률 (%)
-TAKE_PROFIT_THRESHOLD=5.0        # 익절 수익률 (%)
 AI_SCORE_FLOOR=-50               # AI 점수 하한 (이 미만이면 매수 중지)
+
+# 스노우볼 전략
+MAX_BUYS_PER_DAY=2               # 종목당 하루 최대 매수 횟수
+TAKE_PROFIT_STEPS=2.0:33,4.0:33,6.0:100   # 부분 익절 (수익률%:매도비중%), 마지막은 전량
+STOP_LOSS_THRESHOLD=-5.0         # 손절선 (%), 0 이하면 비활성
+TAKE_PROFIT_THRESHOLD=5.0        # (구) 단일 익절 기준 — TAKE_PROFIT_STEPS 사용 시 미사용
 ```
 
 **중요:**
@@ -198,6 +210,8 @@ python main.py
 3. 네트워크 장애를 원활하게 처리
 4. 중단될 때까지 계속 실행
 
+**주의 (모의투자 운영규정)**: 모의투자는 정규장 주문만 체결됩니다. 따라서 **모의투자에서만** 미국 정규장 시간(09:30~16:00 ET)에 주문을 실행하고, 그 외 시간에는 사이클을 건너뜁니다(로그에 `[모의투자] 미국 정규장 아님 — 주문 스킵` 기록). 실전투자는 시간외 주문도 체결되므로 시간 제한을 적용하지 않습니다. 한국시간으로는 서머타임 기간 22:30~05:00, 그 외 23:30~06:00입니다.
+
 ### 6단계: 모니터링 및 로그
 
 #### 6.1 현재 로그 보기
@@ -256,10 +270,15 @@ python main.py
 | `KIS_MOCK_APP_SECRET` / `KIS_REAL_APP_SECRET` | 모드별 API 시크릿 | `None` | 아니오 |
 | `KIS_MOCK_ACCOUNT_NO` / `KIS_REAL_ACCOUNT_NO` | 모드별 계좌번호 | `None` | 아니오 |
 | `GEMINI_API_KEY` | Gemini API 키 | `None` | 예 |
-| `TARGET_TICKER` | 거래 대상 티커 | `QQQ` | 아니오 |
-| `BUY_RATIO` | 거래당 포트폴리오 배분 비율 | `0.30` | 아니오 |
+| `TARGET_TICKER` | 해외 거래 대상 티커 | `QQQ` | 아니오 |
+| `IS_DOMESTIC_ENABLED` | 국내 ETF 동시 운용 여부 | `True` | 아니오 |
+| `DOMESTIC_TICKER` | 국내 거래 대상 티커 | `379800` | 아니오 |
+| `BUY_RATIO` | 해외 1회 매수 비중 | `0.15` | 아니오 |
+| `DOMESTIC_BUY_RATIO` | 국내 1회 매수 비중 | `0.10` | 아니오 |
 | `DIP_THRESHOLD` | 가격 하락 트리거 (%) | `-1.5` | 아니오 |
-| `TAKE_PROFIT_THRESHOLD` | 익절 임계값 (%) | `5.0` | 아니오 |
+| `MAX_BUYS_PER_DAY` | 종목당 하루 최대 매수 횟수 | `2` | 아니오 |
+| `TAKE_PROFIT_STEPS` | 부분 익절 단계 (`수익률%:매도비중%`) | `2.0:33,4.0:33,6.0:100` | 아니오 |
+| `STOP_LOSS_THRESHOLD` | 손절선 (%, 0 이하면 비활성) | `-5.0` | 아니오 |
 | `AI_SCORE_FLOOR` | 거래를 위한 최소 AI 점수 | `-50` | 아니오 |
 
 ## 문제 해결

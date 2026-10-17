@@ -18,7 +18,7 @@ stock-auto-trader/
 ├── config.py                   # Configuration management
 ├── state.py                    # State tracking
 ├── kis_overseas.py              # KIS API integration
-├── kis_domestic.py             # Domestic ETF API (Phase 2)
+├── kis_domestic.py             # KIS 국내주식 API (구현 완료)
 ├── ai_analyzer.py              # AI market analysis
 ├── trader.py                   # Core trading logic
 ├── trading_strategy.py          # Advanced trading strategies (미사용)
@@ -488,31 +488,16 @@ class ErrorMonitor:
 
 ## Phase 2 개발 가이드
 
-### 1. 국내 ETF 통합 (kis_domestic.py)
+### 1. 국내 ETF 통합 (kis_domestic.py) — ✅ 구현 완료
 
-현재 이 모듈은 인터페이스만 정의되어 있고 모든 함수가 `NotImplementedError`를 발생시킵니다.
+`get_domestic_price`, `get_domestic_balance`, `get_orderable_cash`, `buy_domestic`, `sell_domestic_all` 모두 구현되어 있다. 모의/실전 TR_ID 분기(`VTTC0802U`/`TTTC0802U` 등)와 `rt_cd` 실패 검사를 사용하며, 주문 URL은 `/uapi/domestic-stock/v1/trading/order-cash`이다.
 
-#### 구현할 인터페이스
+#### 설정
 ```python
-def get_domestic_price(ticker: str) -> float:
-    """국내 ETF 현재가 조회."""
-    ...
-
-def buy_domestic(ticker: str, quantity: int) -> dict:
-    """국내 ETF 매수."""
-    ...
-
-def sell_domestic_all(ticker: str, quantity: int) -> dict:
-    """국내 ETF 전량 매도."""
-    ...
-```
-
-#### 설정 업데이트
-```python
-# 국내 거래 설정 추가
-IS_DOMESTIC_ENABLED = os.getenv("IS_DOMESTIC_ENABLED", "False").lower() == "true"
-DOMESTIC_TICKERS = os.getenv("DOMESTIC_TICKERS", "379800").split(',')
-DOMESTIC_MAX_ALLOCATION = float(os.getenv("DOMESTIC_MAX_ALLOCATION", "0.20"))
+# 국내 거래 설정 (해외와 동시 운용)
+IS_DOMESTIC_ENABLED = os.getenv("IS_DOMESTIC_ENABLED", "True").lower() == "true"
+DOMESTIC_TICKER = os.getenv("DOMESTIC_TICKER", "379800")
+DOMESTIC_BUY_RATIO = float(os.getenv("DOMESTIC_BUY_RATIO", "0.20"))
 ```
 
 ### 2. 고급 거래 전략

@@ -81,14 +81,58 @@ def _headers(token: str, tr_id: str) -> dict:
     }
 
 
+# KIS 모의투자는 초당 거래건수 제한이 있어 0.5초 간격으로 호출하면
+# "초당 거래건수를 초과하였습니다" (HTTP 500) 오류가 간헐 발생한다.
+# 모의/실전 공통으로 1초 이상 간격을 두고, rate limit이면 짧게 대기 후 재시도한다.
+_MIN_CALL_INTERVAL_SEC = 1.0
+_RETRY_SLEEP_SEC = 1.5
+_last_call_ts = 0.0
+
+
+def _request(method: str, url: str, tr_id: str, *, max_attempts: int = 3, **kwargs):
+    """
+    KIS API 공통 호출 래퍼.
+    - 호출 간 최소 간격을 보장해 초당 거래건수 제한을 회피
+    - HTTP 500(rate limit 등)이면 재시도
+    """
+    global _last_call_ts
+
+    last_error = None
+    for attempt in range(max_attempts):
+        since = time.monotonic() - _last_call_ts
+        if since < _MIN_CALL_INTERVAL_SEC:
+            time.sleep(_MIN_CALL_INTERVAL_SEC - since)
+
+        try:
+            resp = requests.request(
+                method, url, headers=_headers(get_access_token(), tr_id),
+                timeout=10, **kwargs,
+            )
+        finally:
+            _last_call_ts = time.monotonic()
+
+        if resp.status_code != 500:
+            return resp
+
+        last_error = resp
+        body = ""
+        try:
+            body = str(resp.json().get("msg1", ""))
+        except Exception:
+            pass
+        logger.debug(f"KIS 500 응답 ({attempt+1}/{max_attempts}) {body.strip()}")
+        if attempt < max_attempts - 1:
+            time.sleep(_RETRY_SLEEP_SEC)
+
+    return last_error if last_error is not None else resp
+
+
 # ─────────────────────────────────────────────
 # 시세 / 잔고
 # ─────────────────────────────────────────────
 
 def get_current_price(ticker: str) -> float:
     """해외주식 현재가(USD) 조회."""
-    token = get_access_token()
-    time.sleep(0.5)
     url = f"{config.KIS_BASE_URL}/uapi/overseas-price/v1/quotations/price"
     params = {
         "AUTH": "",
@@ -96,18 +140,49 @@ def get_current_price(ticker: str) -> float:
         "SYMB": ticker,
     }
     try:
-        resp = requests.get(url, headers=_headers(token, "HHDFS00000300"),
-                            params=params, timeout=10)
+        resp = _request("GET", url, "HHDFS00000300", params=params)
         resp.raise_for_status()
-    except ConnectionError as e:
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
         logger.warning(f"KIS API 네트워크 오류 (get_current_price): {e}")
         # 모의투자 모드에서는 기본값 반환
         if config.IS_MOCK:
             logger.info("모의투자 모드 - 기본값 100.00으로 반환")
             return 100.0
         raise
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"KIS 시세 조회 최종 실패: {e}")
+        raise
     data = resp.json()
     return float(data["output"]["last"])
+
+
+def get_daily_closes(ticker: str, count: int = 60) -> list[float]:
+    """
+    해외주식 일봉 종가를 과거 → 최신 순으로 반환 (보조지표 계산용).
+    """
+    url = f"{config.KIS_BASE_URL}/uapi/overseas-price/v1/quotations/dailyprice"
+    params = {
+        "AUTH": "",
+        "EXCD": "NAS",
+        "SYMB": ticker,
+        "GUBN": "0",        # 0=일봉
+        "BYMD": "",
+        "MODP": "1",        # 수정주가 반영
+    }
+    resp = _request("GET", url, "HHDFS76240000", params=params)
+    resp.raise_for_status()
+    rows = resp.json().get("output2") or []
+    # API는 최신순으로 주므로 역순 정렬
+    closes = [_to_float(r.get("clos")) for r in reversed(rows)]
+    return [c for c in closes if c > 0][-count:]
+
+
+def _to_float(v) -> float:
+    """KIS 응답 문자열을 float로 변환 (실패 시 0)."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def get_balance() -> dict:
@@ -118,13 +193,10 @@ def get_balance() -> dict:
         "avg_price_usd": float,     # 평균 단가 (USD)
         "eval_amt_krw": float,      # 평가 금액 (원화)
         "profit_rate": float,       # 수익률 (%)
-        "cash_krw": float,          # 예수금 (원화)
-        "total_asset_krw": float,   # 총자산 (원화)
+        "cash_krw": float,          # 주문가능금 (원화) = 외화 예수금 + 국내 원화 예수금
+        "total_asset_krw": float,   # 총자산 (원화) = 평가금액 + 주문가능금
     }
     """
-    token = get_access_token()
-    time.sleep(0.5)
-
     # 모의/실전 TR_ID 분기
     tr_id = "VTTS3012R" if config.IS_MOCK else "TTTS3012R"
     url = f"{config.KIS_BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance"
@@ -132,13 +204,12 @@ def get_balance() -> dict:
     params = {
         "CANO": account_no,
         "ACNT_PRDT_CD": account_suffix,
-        "OVRS_EXCG_CD": "NAS",
+        "OVRS_EXCG_CD": "",
         "TR_CRCY_CD": "USD",
         "CTX_AREA_FK200": "",
         "CTX_AREA_NK200": "",
     }
-    resp = requests.get(url, headers=_headers(token, tr_id),
-                        params=params, timeout=10)
+    resp = _request("GET", url, tr_id, params=params)
     resp.raise_for_status()
     result = resp.json()
 
@@ -151,49 +222,73 @@ def get_balance() -> dict:
     )
 
     rate = get_usd_krw_rate()
-    quantity     = float(target.get("ovrs_cblc_qty", 0))
-    avg_price    = float(target.get("pchs_avg_pric", 0))
-    eval_amt_krw = float(target.get("evlu_amt", 0))         # API가 원화로 줄 수도 있음
-    profit_rate  = float(target.get("evlu_pfls_rt", 0))
-    cash_krw     = float(output2.get("frcr_dncl_amt_2", 0)) * rate
-    total_krw    = float(output2.get("tot_evlu_pfls_amt", 0)) or (eval_amt_krw + cash_krw)
 
-    # 외화 예수금이 0원인 경우(원화 증거금 기반 자동환전 계좌), 원화 예수금 조회
-    if cash_krw <= 0:
+    def _num(v) -> float:
+        """KIS 응답은 미사용 필드를 None으로 주므로 안전하게 0으로 변환."""
         try:
-            dom_tr_id = "VTTC8434R" if config.IS_MOCK else "TTTC8434R"
-            dom_url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance"
-            dom_params = {
-                "CANO": account_no,
-                "ACNT_PRDT_CD": account_suffix,
-                "AFHR_FLPR_YN": "N",
-                "OFL_YN": "",
-                "INQR_DVSN": "02",
-                "UNPR_DVSN": "01",
-                "FUND_STTL_ICLD_YN": "N",
-                "FNCG_AMT_AUTO_RDPT_YN": "N",
-                "PRCS_DVSN": "00",
-                "CTX_AREA_FK100": "",
-                "CTX_AREA_NK100": "",
-            }
-            dom_resp = requests.get(dom_url, headers=_headers(token, dom_tr_id),
-                                    params=dom_params, timeout=10)
-            if dom_resp.status_code == 200:
-                dom_data = dom_resp.json()
-                dom_output2 = dom_data.get("output2", {})
-                if isinstance(dom_output2, list) and dom_output2:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    quantity     = _num(target.get("ovrs_cblc_qty"))
+    avg_price    = _num(target.get("pchs_avg_pric"))
+    # 보유분 평가금액: USD(ovrs_stck_evlu_amt) × 환율
+    eval_amt_krw = _num(target.get("ovrs_stck_evlu_amt")) * rate
+    profit_rate  = _num(target.get("evlu_pfls_rt"))
+
+    # 통합증거금 계좌: 외화 예수금과 국내 원화 예수금을 합산해 주문가능금으로 사용
+    cash_frcr_krw = _num(output2.get("frcr_dncl_amt_2")) * rate
+    cash_dom_krw  = 0.0
+
+    try:
+        dom_tr_id = "VTTC8434R" if config.IS_MOCK else "TTTC8434R"
+        dom_url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance"
+        dom_params = {
+            "CANO": account_no,
+            "ACNT_PRDT_CD": account_suffix,
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "00",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+        dom_resp = _request("GET", dom_url, dom_tr_id, params=dom_params)
+        if dom_resp.status_code == 200:
+            dom_data = dom_resp.json()
+            dom_output2 = dom_data.get("output2", {})
+            if isinstance(dom_output2, list):
+                if dom_output2:
                     dom_output2 = dom_output2[0]
-                dnca = float(dom_output2.get("dnca_tot_amt", 0))
-                if dnca > 0:
-                    cash_krw = dnca
-                    total_krw = float(dom_output2.get("tot_evlu_amt", 0)) or (eval_amt_krw + cash_krw)
-        except Exception as e:
-            logger.warning(f"원화 예수금(자동환전) 조회 실패: {e}")
+                else:
+                    logger.warning("국내잔고 output2 빈 리스트 — dnca=0으로 처리")
+                    dom_output2 = {}
+            cash_dom_krw = _num(dom_output2.get("dnca_tot_amt"))
+            logger.debug(f"국내잔고 원화 예수금(dnca): {cash_dom_krw:,.0f}원")
+    except Exception as e:
+        logger.warning(f"원화 예수금(통합증거금) 조회 실패: {e}")
 
+    # 통합증거금: 주문가능금 = 외화 예수금(원화환산) + 국내 원화 예수금
+    # KIS 모의 서버는 frcr_dncl_amt_2를 내려주지 않는 경우가 있어, 외화가 0이면
+    # 국내 원화 예수금으로 대체한다 (자동환전 계좌는 원화만 존재).
+    if cash_frcr_krw <= 0:
+        cash_krw = cash_dom_krw
+    else:
+        cash_krw = cash_frcr_krw + cash_dom_krw
 
-    # KIS 실제 응답 예시에는 "evlu_pfls_amt" 필드가 루트 레벨에 있을 수 있음
-    if "evlu_pfls_amt" in result:
-        total_krw = float(result["evlu_pfls_amt"])
+    # 총자산 = 보유 평가금액 + 주문가능금
+    total_krw = eval_amt_krw + cash_krw
+
+    logger.info(
+        f"[통합증거금] 외화 {cash_frcr_krw:,.0f}원 + 국내 {cash_dom_krw:,.0f}원 "
+        f"= 주문가능 {cash_krw:,.0f}원 | 총자산 {total_krw:,.0f}원"
+    )
+
+    if cash_krw <= 0:
+        logger.warning("⚠️ 예수금 조회 최종 실패 — 0원으로 처리됨 (API 응답 확인 필요)")
 
     return {
         "quantity": quantity,
@@ -206,22 +301,25 @@ def get_balance() -> dict:
 
 
 def get_usd_krw_rate() -> float:
-    """USD/KRW 환율 조회."""
-    token = get_access_token()
-    time.sleep(0.5)
+    """USD/KRW 환율 조회 (KIS 해외시세 환율 엔드포인트)."""
     url = f"{config.KIS_BASE_URL}/uapi/overseas-price/v1/quotations/inquire-daily-chartprice"
-    # 간이 환율 조회 — 실제로는 KIS 환율 조회 엔드포인트 사용
-    # 아래는 예시이며, 실제 엔드포인트로 교체 필요
-    # 대안: requests.get("https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD")
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "X",
+        "FID_INPUT_ISCD": "FX@KRW",     # 원/달러
+        "FID_INPUT_DATE_1": "",
+        "FID_INPUT_DATE_2": "",
+        "FID_PERIOD_DIV_CODE": "D",
+    }
     try:
-        resp = requests.get(
-            "https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD",
-            timeout=5,
-        )
-        data = resp.json()
-        return float(data[0]["basePrice"])
-    except Exception:
-        logger.warning("환율 조회 실패, 기본값 1350 사용")
+        resp = _request("GET", url, "FHKST03030100", params=params)
+        resp.raise_for_status()
+        output = resp.json().get("output1") or {}
+        rate = float(output.get("ovrs_nmix_prpr"))   # 현재 환율
+        if rate <= 0:
+            raise ValueError(f"비정상 환율: {rate}")
+        return rate
+    except Exception as e:
+        logger.warning(f"환율 조회 실패({e}), 기본값 1350 사용")
         return 1350.0
 
 
@@ -236,9 +334,6 @@ def buy_shares(quantity: int, price_usd: float) -> dict:
     """
     if quantity <= 0:
         raise ValueError(f"매수 수량은 1주 이상이어야 합니다: {quantity}")
-
-    token = get_access_token()
-    time.sleep(0.5)
 
     # 모의: VTTT1002U, 실전: TTTT1002U (해외주식 매수주문)
     tr_id = "VTTT1002U" if config.IS_MOCK else "TTTT1002U"
@@ -258,18 +353,19 @@ def buy_shares(quantity: int, price_usd: float) -> dict:
         "MGCO_APTM_ODNO": "",
         "ORD_SVR_DVSN_CD": "0",
     }
-    resp = requests.post(url, headers=_headers(token, tr_id), json=body, timeout=10)
+    resp = _request("POST", url, tr_id, json=body)
     resp.raise_for_status()
     result = resp.json()
+    if str(result.get("rt_cd")) != "0":
+        raise RuntimeError(
+            f"해외 매수 주문 실패 [{result.get('msg_cd')}] {result.get('msg1', '').strip()}"
+        )
     logger.info(f"매수 주문 완료: {config.TARGET_TICKER} {quantity}주 (${price_usd:.2f}) → {result.get('msg1')}")
     return result
 
 
 def sell_all(quantity: float, current_price_usd: float) -> dict:
     """보유 수량 전량 시장가 매도."""
-    token = get_access_token()
-    time.sleep(0.5)
-
     tr_id = "VTTS0308U" if config.IS_MOCK else "TTTS0308U"
     url = f"{config.KIS_BASE_URL}/uapi/overseas-stock/v1/trading/order"
 
@@ -287,8 +383,12 @@ def sell_all(quantity: float, current_price_usd: float) -> dict:
         "MGCO_APTM_ODNO": "",
         "ORD_SVR_DVSN_CD": "0",
     }
-    resp = requests.post(url, headers=_headers(token, tr_id), json=body, timeout=10)
+    resp = _request("POST", url, tr_id, json=body)
     resp.raise_for_status()
     result = resp.json()
+    if str(result.get("rt_cd")) != "0":
+        raise RuntimeError(
+            f"해외 매도 주문 실패 [{result.get('msg_cd')}] {result.get('msg1', '').strip()}"
+        )
     logger.info(f"전량 매도 주문 완료: {quantity}주 → {result}")
     return result
