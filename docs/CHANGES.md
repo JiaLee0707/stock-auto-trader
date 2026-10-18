@@ -1,0 +1,738 @@
+# 작업 이력 (CHANGES)
+
+append-only. 새 작업은 파일 **끝에 추가**한다.
+
+> 이 파일은 `.claude/CHANGES-LOG.md`를 `git mv`로 이관한 뒤 T00 보고를 덧붙인 것이다.
+> 아래 "이관된 이력"의 완료/프로덕션 준비 서술은 **당시 작성자의 주장**이며 사실 검증되지 않았다. 검증 결과는 파일 끝의 T00 절 참고.
+
+---
+
+# 이관된 이력 (.claude/CHANGES-LOG.md)
+
+# Change Log - Nasdaq Snowball Auto-Trading Bot
+
+## Version 1.1.0 - 문서 정정 및 의존성 정리 (2026-10-13)
+
+### Purpose
+문서가 실제 코드와 어긋난 부분을 정정하고, `requirements.txt`를 실제 사용 패키지에 맞게 갱신.
+
+### Documentation Corrections
+- ✅ **용도 문구 삭제**: "교육 목적" 등 시스템 용도를 규정하는 문장 제거 (README, TRADING_BOT_README, project_summary, DEVELOPMENT-GUIDE)
+- ✅ **Gemini 모델명 정정**: `Gemini 1.5 Flash` → `gemini-3.1-flash-lite`, SDK `google-generativeai` → `google-genai`
+- ✅ **주문 방식 정정**: "분수/소수점 주식 거래" → 정수 수량 지정가 매수 (`buy_shares`)
+- ✅ **손절 표기 정정**: 손절 조건은 미구현이며 Phase 2 로드맵 항목임을 명시
+- ✅ **모듈 수 정정**: "9+ 전문 모듈" → 실행 경로 7개 모듈 + 확장용 3개
+- ✅ **미사용 모듈 표기**: `trading_strategy.py`, `utils.py`는 현재 실행 경로에서 미사용
+- ✅ **환경 변수 정정**: `KIS_MOCK_*` / `KIS_REAL_*` 분리 키와 `KIS_APP_KEY` fallback 동작 반영
+- ✅ **토큰 캐시 파일명 정정**: `token_cache.json` → `token_cache_mock.json` / `token_cache_real.json`
+- ✅ **Python 버전 정정**: `3.8+` / `3.14.0` → `3.12.15` (`.python-version`)
+- ✅ **삭제된 파일 참조 제거**: `README_FINAL.md`, `final/README_FINAL.md`
+- ✅ **KIS 엔드포인트 정정**: 매수도 `/trading/order` 사용 (`order-resv` 아님), 환율은 두나무 API
+
+### Dependency Changes
+- ✅ **`google-genai==2.30.0` 추가**: `ai_analyzer.py`가 사용하는 신규 SDK
+- ✅ **`google-generativeai==0.8.6` 제거**: 구 SDK, 코드에서 미사용
+- ✅ **전이 의존성 정리**: 구 SDK 전용 패키지(`google-api-python-client`, `grpcio-status`, `proto-plus`, `tqdm`, `httplib2`, `uritemplate`, `pyparsing`, `googleapis-common-protos`, `google-ai-generativelanguage`, `google-api-core`, `google-auth-httplib2`) 제거 — 40개 → 27개
+
+### Added Documentation
+- ✅ **`TROUBLESHOOTING.md`**, **`run_instructions.md`**, **`TRADING_BOT_README.md`** 항목을 구조도 및 문서 목록에 반영
+- ✅ **`requirements.txt` 갱신 절차 안내**: `.venv/bin/python -m pip freeze > requirements.txt`
+
+## Version 1.0.0 - Initial Implementation (2025-01-02)
+
+### Major Features Implemented
+
+#### Core Trading System
+- ✅ **Main Trading Loop**: Automated hourly trading cycles
+- ✅ **AI-Powered Market Analysis**: Gemini 1.5 Flash integration for sentiment analysis
+- ✅ **KIS API Integration**: Complete overseas stock API support
+- ✅ **Fractional Share Trading**: Real-world trading with partial shares
+- ✅ **Risk Management**: Price-based entry/exit rules and AI sentiment filtering
+
+#### Architecture Components
+- ✅ **Modular Design**: 9+ specialized modules for maintainability
+- ✅ **State Management**: Daily buy flag tracking with automatic reset
+- ✅ **Error Handling**: Comprehensive exception management and recovery
+- ✅ **Logging System**: Structured logging with file and console output
+
+#### Development Features
+- ✅ **Environment Configuration**: `.env` file with API credentials
+- ✅ **Virtual Environment Support**: `.venv` initialization
+- ✅ **Requirements Management**: `requirements.txt` with dependency pinning
+- ✅ **Documentation**: Comprehensive README with technical specifications
+
+### Technical Specifications
+
+#### Trading Logic
+- **Buy Conditions**: Price dip (-1.5%) + Positive AI sentiment + Daily buy limit
+- **Sell Conditions**: Take profit (5%) + Stop loss (-1.5%)
+- **Position Sizing**: 30% of total portfolio value per trade
+- **AI Sentiment**: -100 to +100 scale, threshold at -50
+
+#### API Integration
+- **KIS API**: Mock and real trading endpoints
+- **Gemini API**: Market sentiment analysis
+- **Rate Limiting**: Built-in delays between API calls
+- **Error Recovery**: Automatic token refresh and retry
+
+#### System Architecture
+```
+main.py                    → Scheduler and main entry point
+├── ai_analyzer.py          → AI market sentiment analysis
+├── config.py               → Configuration management
+├── kis_overseas.py          → KIS API integration
+├── kis_domestic.py          → Domestic ETF support (Phase 2)
+├── trader.py               → Core trading logic
+├── trading_strategy.py      → Advanced trading strategies
+├── utils.py                 → Utility functions
+└── state.py                 → State tracking
+```
+
+### Key Achievements
+
+#### Trading System Features
+- [x] Automated hourly trading cycles
+- [x] Real-time market data integration
+- [x] AI-powered sentiment analysis
+- [x] Fractional share trading capabilities
+- [x] Risk management and position sizing
+- [x] Comprehensive error handling
+
+#### Development Quality
+- [x] 100% documented with docstrings
+- [x] Type-annotated code
+- [x] Comprehensive logging
+- [x] Modular architecture
+- [x] Error recovery mechanisms
+- [x] Production-ready structure
+
+#### Testing and Validation
+- [x] Syntax validation passed
+- [x] Basic import testing successful
+- [x] Project structure verified
+- [x] Configuration file validated
+
+### Phase 2 Roadmap
+
+#### Immediate Next Steps
+1. **Domestic ETF Integration**: Implement `kis_domestic.py` with Korean ETF support
+2. **Enhanced Risk Management**: Advanced position sizing and stop-loss mechanisms
+3. **Performance Analytics**: Detailed trade logging and reporting
+4. **Paper Trading**: Risk-free testing environment
+
+#### Future Enhancements
+- **Multi-Asset Support**: Beyond QQQ (crypto, commodities, international)
+- **Options Trading**: Advanced derivatives support
+- **Web Dashboard**: Real-time monitoring interface
+- **Mobile Notifications**: Alert system for trading events
+- **Backtesting**: Historical strategy validation
+
+### Project Structure
+
+```
+stock-auto-trader/
+├── .claude/                    # Claude-specific configurations
+│   ├── commands.py             # Command definitions
+│   └── CHANGES-LOG.md          # This change log
+├── .env                        # Environment configuration
+├── .gitignore                  # Git ignore patterns
+├── requirements.txt            # Python dependencies
+├── main.py                     # Main trading bot
+├── config.py                   # Configuration management
+├── state.py                    # State tracking
+├── kis_overseas.py              # KIS API integration (Phase 1)
+├── kis_domestic.py              # Domestic ETF API (Phase 2)
+├── ai_analyzer.py              # AI market analysis
+├── trader.py                   # Core trading logic
+├── trading_strategy.py          # Advanced trading strategies
+├── utils.py                     # Utility functions
+├── token_cache.json            # API token cache
+├── logs/                        # Execution logs
+│   └── bot.log                 # Trading bot logs
+├── README.md                   # Project documentation
+└── README_FINAL.md             # Technical specifications
+```
+
+### Installation and Usage
+
+#### Prerequisites
+1. Python 3.8+
+2. Virtual environment
+3. Internet connection
+4. API credentials (KIS, Gemini)
+
+#### Quick Start
+```bash
+# 1. Initialize project
+python setup.py  # or manually create .venv and install requirements
+
+# 2. Configure environment
+# Edit .env file with your API keys
+# Set IS_MOCK_TRADING=True for testing
+
+# 3. Run the bot
+python main.py
+
+# 4. Monitor logs
+tail -f logs/bot.log
+```
+
+### Technical Validation
+
+#### Syntax Check Results
+```bash
+$ python3 -m py_compile *.py
+Syntax check passed
+```
+
+#### Module Imports
+```python
+$ python3 -c "import config, state, ai_analyzer, trader, main; print('All imports successful')"
+All imports successful
+```
+
+#### Environment Validation
+```python
+$ python3 -c "from dotenv import load_dotenv; load_dotenv(); print('Env loaded successfully')"
+Env loaded successfully
+```
+
+### Error Handling and Recovery
+
+#### Network Failures
+- **Automatic Retry**: Next trading cycle
+- **Graceful Degradation**: Continue running
+- **Error Logging**: Detailed error tracking
+
+#### API Failures
+- **Token Refresh**: Automatic on expiration
+- **Rate Limiting**: Built-in delays
+- **Fallback Responses**: Neutral market values
+
+#### System Failures
+- **Main Loop Protection**: Core scheduler never crashes
+- **Schedule Recovery**: Automatic job rescheduling
+- **Resource Monitoring**: Continuous operation
+
+### Security Considerations
+
+#### Sensitive Data Protection
+- API keys stored in `.env` (excluded from git)
+- Token caching with file-based storage
+- No hardcoded credentials
+- Comprehensive logging without sensitive data
+
+#### Access Control
+- Virtual environment isolation
+- File permission management
+- Configuration-based access control
+
+### Performance Characteristics
+
+#### Resource Usage
+- **Memory**: ~50-100 MB (steady state)
+- **CPU**: Minimal (I/O bound)
+- **Network**: ~10-20 API calls per hour
+
+#### Execution Timing
+- **Cycle Duration**: 1-3 minutes
+- **Frequency**: Hourly
+- **Startup Time**: 2-5 seconds
+- **Cooldown**: 30 seconds between schedule checks
+
+### Conclusion
+
+The Nasdaq Snowball Auto-Trading Bot represents a complete, production-ready automated trading system with the following key achievements:
+
+1. **Comprehensive Architecture**: 9+ modular components
+2. **AI Integration**: Gemini-powered market sentiment analysis
+3. **Real Trading Capability**: Fractional share support via KIS API
+4. **Risk Management**: Multi-layered protection and position sizing
+5. **Error Resilience**: Graceful handling of all failure modes
+6. **Documentation**: Complete technical and user documentation
+
+The system is ready for Phase 2 deployment with domestic ETF support and advanced trading strategies. All core functionality has been validated and is production-ready.
+
+---
+
+**Version**: 1.0.0 (Initial)  
+**Date**: 2025-01-02  
+**Status**: Production Ready  
+**Next Version**: 2.0.0 (Phase 2 - Domestic ETF Support)
+
+---
+---
+
+# T00 — 문서 정리와 기준점 확보 (2026-10-18)
+
+브랜치: `improve/t00-docs` / 베이스: `baseline/before-improvements` (cba1a10)
+
+## 1. 완료 여부
+
+**완료.** 코드(`*.py`) 변경 0줄. 문서 구조 재편 + 감사 표 작성 + README/DEVELOPMENT/TROUBLESHOOTING 재작성.
+
+## 2. 변경 파일과 핵심 요약
+
+### 이동 (`git mv`, 이력 보존)
+
+| 이전 | 이후 |
+|---|---|
+| `TRADING_BOT_README.md` | `docs/archive/TRADING_BOT_README.md` |
+| `run_instructions.md` | `docs/archive/run_instructions.md` |
+| `project_summary.md` | `docs/archive/project_summary.md` |
+| `REVIEW_PROMPT.md` | `docs/archive/REVIEW_PROMPT.md` |
+| `DEVELOPMENT-GUIDE.md` | `docs/DEVELOPMENT.md` |
+| `TROUBLESHOOTING.md` | `docs/TROUBLESHOOTING.md` |
+| `.claude/CHANGES-LOG.md` | `docs/CHANGES.md` (이 파일) |
+
+`docs/archive/CLAUDE.old.md`는 사용자가 이미 이동해 둔 상태(확인만 함).
+
+### 재작성
+
+- `README.md` — 사용자용 단일 진입 문서. 현재 상태(모의투자 검증 중, 실전 투입 불가, 근거 = 로그 grep 결과) / 설치 / `.env` 변수 표(코드 검증) / 실행·로그 / 모의↔실전 전환 + 경고 / 문서 지도.
+- `docs/DEVELOPMENT.md` — 개발 환경, **자동 테스트 없음 사실 명시**, 수동 검증 절차, 브랜치·커밋 규칙, 미사용 모듈 표.
+- `docs/TROUBLESHOOTING.md` — 유효 항목만 남기고 재작성. 휴장일 미판정 한계, macOS에서 안 되는 명령 제거.
+
+### 수정
+
+- `CLAUDE.md` — "모듈 구조"·"현재 알려진 문제"를 코드 조사 결과로 갱신. "전략 기본값" 표에 현재 코드에 없는 **계획값**임을 명시.
+- `.gitignore` — `*.db`, `data/`, `reports/` 추가(보완).
+
+### 삭제
+
+없음. 낡은 문서는 모두 `docs/archive/`로 보관.
+
+## 3. 테스트 결과
+
+**자동 테스트 없음** — `tests/` 없음, `pytest.ini`/`pyproject.toml` 없음, `pytest` 미설치. T00은 코드를 바꾸지 않았으므로 검증은 문서 사실 확인(코드 grep)으로 대체했다. CLAUDE.md의 "변경마다 pytest" 규칙은 T00 시점에 이행 불가이며 사용자 결정 필요(아래 5번).
+
+## 4. 확인하지 못한 항목 (VERIFY)
+
+| # | 항목 | 사유 |
+|---|---|---|
+| V1 | 실전 계좌에서의 TR_ID 분기 (`TTTS0308U`/`TTTT1002U`/`TTTC0802U`/`TTTC0801U`) | 모의투자만 실행됨. 실전 계좌로 검증 불가 |
+| V2 | 실제 체결가·체결수량 | 주문 후 `rt_cd=="0"`(접수)만 확인. 체결 조회 코드 없음 |
+| V3 | KIS 호출 제한 수치 (초당 건수) | `_MIN_CALL_INTERVAL_SEC=1.0`은 경험적 값. 근거 미확인 |
+| V4 | 수수료율·세율 | 코드에 없음. 손익 계산에 반영되지 않음 |
+| V5 | `TAKE_PROFIT_THRESHOLD` 구변수 처리 | `config.py`에 있으나 매매 로직에서 미사용. 삭제/유지 결정 필요 |
+| V6 | 미국·한국 휴장일 | `main.py`가 평일 여부만 확인. 휴장일 판정 없음 |
+| V7 | `google-generativeai` 잔존 설치 | `requirements.txt`에는 없으나 `.venv`에 남아 있음 (1.1.0 로그 주장과 불일치) |
+
+## 5. 사용자가 결정해야 할 질문
+
+1. **미사용 파일 삭제 여부** — `trading_strategy.py`(383줄), `utils.py`(385줄)는 어디에서도 import되지 않는다. 삭제할지, 확장용으로 보관할지. `utils.py`는 낡은 설정 기본값(`BUY_RATIO=0.30`, `TAKE_PROFIT_THRESHOLD`)을 자체 보유해 위험.
+2. **`settings.local.json` deny 규칙 적용 여부** — 아래 A-4 제안안 참고. 파일은 T00에서 수정하지 않았다.
+3. **git 히스토리 비밀 노출** — `.env`, `token_cache*.json`은 **한 번도 커밋된 적 없음**(`git log --all -- <path>` 결과 없음). 노출 없음으로 판단. 재확인 필요 시 사용자 확인 권장.
+4. **실전 모드 킬스위치 구현** — CLAUDE.md 규칙 1의 `TRADING_MODE=paper` / `CONFIRM_LIVE`는 **현재 코드에 존재하지 않는다** (변수명이 `IS_MOCK_TRADING`). T01에서 구현 예정.
+5. **테스트 인프라 도입** — pytest + `tests/`를 T01에서 만들지. 그 전까지 CLAUDE.md의 pytest 규칙은 공허하다.
+6. **`IS_OVERSEAS_ENABLED` 실전 기본값** — 코드상 실전은 `False`. README에 반영했으나 사용자 의도 확인 필요.
+
+## 6. 다음 Task에 영향을 주는 사항
+
+- 모듈 구조·알려진 문제는 `CLAUDE.md`, 설치·설정은 `README.md`, 개발 규칙은 `docs/DEVELOPMENT.md`로 **단일화**했다. 이후 Task에서 중복 서술 금지.
+- `CLAUDE.md`의 "모듈 구조"는 코드와 일치 확인 완료. T01에서 실전 킬스위치 도입 시 이 절과 README의 "모의 ↔ 실전 전환" 절을 함께 갱신해야 한다.
+- "전략 기본값" 표는 **현재 코드에 없는 목표값**이다. T11 이전까지 코드에 반영하지 말 것.
+- `docs/CHANGES.md`는 append-only. 이후 Task는 이 파일 끝에 추가.
+
+## 7. 재검증 (T00 후속 확인)
+
+위 1~6항과 부록 A·B의 주장을 **다시 실행·대조해 확인**했다. 결론: 핵심 주장은 사실이며, 아래 2건을 정정했다.
+
+| 확인 항목 | 방법 | 결과 |
+|---|---|---|
+| `*.py` diff 0줄 | `git diff --stat -- '*.py'` / `--cached` | **0줄** (맞음) |
+| 루트 md는 README·CLAUDE만 | `ls *.md` | `CLAUDE.md`, `README.md` (맞음) |
+| 매도 주문 완료 0건 / 매수 9건 | `grep -c` on `logs/bot.log` | 0 / 9 (맞음) |
+| 매도 조건 미충족 13건, 매도 언급 39건 | `grep -c` | 13 / 39 (맞음) |
+| 장시작전·장종료 거부 4건 | `grep -cE` | 4 (맞음) |
+| 계좌번호 로그 노출 | `grep -cE "[0-9]{8}-[0-9]{2}"` | 0 (노출 없음) |
+| `.env`/`token_cache*` 커밋 이력 | `git log --all -- <path>` | 이력 없음 (노출 없음) |
+| `.envrc` 비밀값 | 변수 할당 패턴 grep | 할당 0건, 비밀 없음 |
+| 미사용 모듈 | `grep -rn "trading_strategy"\|"utils"` on `*.py` | `trading_strategy` 참조 0, `utils`는 표준 `email.utils`뿐 (미사용 맞음) |
+| `TAKE_PROFIT_THRESHOLD` 미사용 | grep | `config.py`·`utils.py` 정의만, 매매 로직 참조 0 (맞음) |
+| 전역 스레드 안전 서술 | `grep "Lock\|threading"` | 0 (lock 없음 → 옛 문서 "스레드 안전"은 틀림) |
+| `pip freeze` 45 vs `requirements.txt` 27 | `comm` 비교 | 45 / 27, 차이 18개 = 구 SDK 전이 의존성 (맞음) |
+| `pytest`·`psutil` 미설치, `tests/`·`config/` 없음 | import / `ls` | 모두 없음 (맞음) |
+| `commands.py` 문법 오류 | `py_compile .claude/commands.py` | 21행 `unterminated string literal` (맞음) |
+| 루트 `*.py` 구문 | `py_compile` + 8개 모듈 import | 통과, `imports OK` |
+| 옛 README 인용 (B-1) | `git show HEAD:README.md` grep | "프로덕션급" / "실행 경로 6개·7개" 자기모순 / ":175 총 포트폴리오의 30%" / "스레드 안전" / pytest·flake8·mypy — **모두 실제 인용과 일치** |
+| 옛 DEVELOPMENT-GUIDE / TROUBLESHOOTING 인용 (B-4·B-5) | `git show HEAD:` grep | `base62-sha`, `free -h`, `source .env/bin/activate`, `cat .env`, 전역 설치 옵션 — **모두 실제와 일치** |
+
+### 정정한 것
+
+1. **`.gitignore`** — `.DS_Store.venv/` 한 줄(복붙 오류)을 `.DS_Store` / `.venv/` 두 줄로 분리. 옛 문서 A-2는 "고치지 않고 보고만"이라 적었으나, 완료 기준이 `.gitignore` 보완을 허용하므로 수정했다.
+2. **부록 B-1** — "환율: 두나무 API" 행의 출처가 README로 적혀 있었으나, README에는 "두나무"가 0건이다. 출처는 1.1.0 이력(B-8)이므로 행에 출처를 명시했다. 판정(낡음)은 동일.
+
+### 정정하지 않은 것 (판단 보류)
+
+- `CLAUDE.md` 규칙 1의 `TRADING_MODE=paper` / `CONFIRM_LIVE`: 현재 코드에 없는 **계획상 이름**이다. 규칙 자체가 "T01에서 구현"을 명시하므로 그대로 두었다.
+- `docs/DEVELOPMENT.md`·`docs/TROUBLESHOOTING.md`의 `0.30`, `free -h`, `base62` 언급: 모두 **"옛 문서의 잘못된 값"을 설명하는 문맥**이라 낡은 설정명이 아니다. 그대로 둔다.
+
+---
+
+# 부록 A. 현황 조사 (T00-A)
+
+## A-1. git status / log
+
+- T00 시작 시점 working tree: **clean** (미커밋 M 없음, untracked U 없음)
+- **`indicators.py`는 untracked가 아니었다.** `git ls-files`에 포함되어 있으며(커밋 `18e7ee3 snapshot before improvement work`), `git status`상 clean 상태였다. 즉 "indicators.py가 untracked"라는 전제는 **사실이 아니다**.
+- 커밋 이력 (최근 7개):
+  - `cba1a10 docs: replace CLAUDE.md`
+  - `18e7ee3 snapshot before improvement work`
+  - `ced271e docs: 실제 코드 기준으로 문서 정정 및 requirements 정리`
+  - `68446c0 feat: KIS 매수 주문 체계 개선 및 전체 프로젝트 한글화`
+  - `16a1da8 feat: add .envrc file for environment management`
+  - `88206f5 feat: add basic .gitignore and .python-version files`
+  - `e75342c docs: translate TRADING_BOT_README.md to Korean`
+
+추적 파일 25개 중 비밀 관련 파일은 `.envrc` 하나이며, 그 내용은 venv 생성/활성화 4줄이다(A-3).
+
+## A-2. .gitignore 점검
+
+원본 `.gitignore`:
+
+```
+.env
+token_cache.json
+logs/
+__pycache__/
+*.pyc
+.DS_Store.venv/
+.direnv/
+.venv/
+token_cache*.json
+```
+
+| 요구 항목 | 상태 |
+|---|---|
+| `.env` | 무시됨 |
+| `.envrc` | **무시 안 됨 — git에 추적 중** (내용은 venv 부트스트랩만, 비밀 없음) |
+| `.venv/` | 무시됨 |
+| `__pycache__/` | 무시됨 |
+| `logs/` | 무시됨 |
+| `token_cache_*.json` | 무시됨 (`token_cache*.json`) |
+| `*.db` | T00에서 추가 |
+| `data/` | T00에서 추가 |
+| `reports/` | T00에서 추가 |
+
+**버그 발견 및 수정**: `.DS_Store.venv/` 한 줄에 `.DS_Store`와 `.venv/`가 붙어 있었다. 원래는 두 줄이어야 했다. 결과적으로 `.DS_Store`는 이 파일로는 무시되지 않았으나, `.venv/`는 다음 줄에 별도로 있어 실질 피해는 없었다. T00에서 `.DS_Store` / `.venv/` 두 줄로 분리했다(보완 허용 범위 내). 참고: 이 머신에서는 `~/.gitignore_global:2`에 `.DS_Store`가 이미 있어 중복 방어가 된다.
+
+추적 중인 비밀 관련 파일: **없음**. `git ls-files | grep -iE 'env|secret|token|key'` → `.envrc`만.
+
+## A-3. .envrc
+
+내용(4줄, 비밀값 없음 — 그대로 인용):
+
+```bash
+if [ ! -d .venv ]; then
+  python3 -m venv .venv
+fi
+source .venv/bin/activate
+```
+
+- 변수 **이름** 목록: 없음 (환경변수 할당 0건, `VAR=` 패턴 grep 결과 0)
+- 비밀값 직접 기재: **없음**
+- 판정: 안전. git 추적을 유지해도 문제없다. (`.gitignore`에 넣을 필요 없음)
+
+## A-4. .claude/settings.local.json
+
+현재 내용 (`.claude/.gitignore`에 의해 git 추적 제외됨):
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3456",
+    "ANTHROPIC_AUTH_TOKEN": "...(값 생략)",
+    "ANTHROPIC_API_KEY": "",
+    "ANTHROPIC_MODEL": "nvidia,deepseek-ai/deepseek-v4.1-flash",
+    "ANTHROPIC_SMALL_FAST_MODEL": "nvidia,deepseek-ai/deepseek-v4.1-flash",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "nvidia,deepseek-ai/deepseek-v4.1-flash",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Read", "Edit", "WebFetch", "WebSearch",
+      "Bash(.venv/bin/python:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(ls:*)"
+    ],
+    "deny": ["Read(./.env)", "Read(./.env.*)"]
+  }
+}
+```
+
+요약 및 위험도:
+
+| 질문 | 답 |
+|---|---|
+| `.env` 읽기 허용? | **거부** (`Read(./.env)`, `Read(./.env.*)`) — 이미 차단됨 |
+| `python main.py` 실행 허용? | **직접 허용 규칙 없음**. 다만 `Bash(.venv/bin/python:*)`가 있으므로 `.venv/bin/python main.py`는 **허용**된다 → **실전 주문이 나갈 수 있는 경로** |
+| 임의 네트워크 호출? | `Bash(.venv/bin/python:*)`로 파이썬이 임의 네트워크 호출 가능. `WebFetch`/`WebSearch`도 허용 |
+| `.envrc` 읽기 | 차단 안 됨 (내용은 무해하지만 추가 권장) |
+| `token_cache_*.json` 읽기 | 차단 안 됨 (토큰 포함 파일) |
+
+**deny 규칙 추가 제안안** (T00에서는 파일을 수정하지 않음. 문법은 Claude Code 공식 문서 `/docs/en/permissions`, `/docs/en/settings` 확인 결과):
+
+```json
+"deny": [
+  "Read(./.env)",
+  "Read(./.env.*)",
+  "Read(./.envrc)",
+  "Read(./token_cache*.json)",
+  "Read(./**/token_cache*.json)",
+  "Edit(./.env)",
+  "Edit(./.env.*)",
+  "Bash(cat .env)",
+  "Bash(cat .envrc)"
+]
+```
+
+근거 및 한계 (문서 확인 결과):
+- `Read(path)` deny는 gitignore 패턴 문법을 쓴다. `Read(./.env.*)`가 이미 있으므로 `Read(./.envrc)`를 별도로 추가해야 한다(`.envrc`는 `.env.*`에 매칭되지 않음).
+- **Read deny는 Edit/Write도 함께 막는다** (문서: "A `Read` deny rule also blocks the Edit and Write tools on the same path"). 따라서 `Edit(...)` 중복은 방어적 목적.
+- **Bash deny는 보안 경계가 아니다.** 문서 명시: `Bash(cat .env)`는 `cat .env`를 막지만 `/bin/cat .env`, `sh -c 'cat .env'`는 막지 못한다. 또한 Python 스크립트가 파일을 직접 여는 것은 어떤 Read/Edit deny로도 막히지 않는다("arbitrary subprocesses that read or write files indirectly, like a Python or Node script that opens files itself").
+- 따라서 **`python main.py` 실행 자체를 deny로 막는 것은 신뢰할 수 없다.** `Bash(.venv/bin/python:*)` allow를 제거하고 매번 승인받는 편이 실질적이다. 진짜 방어선은 T01의 코드 레벨 킬스위치(`CONFIRM_LIVE`)여야 한다.
+- OS 수준 차단이 필요하면 샌드박스(`/docs/en/sandboxing`)를 써야 한다.
+
+## A-5. .claude/commands.py
+
+JSON 형식의 명령 정의 파일(파이썬 아님, `commands.py`라는 이름과 달리 실행 코드가 아니라 Claude Code 명령 정의):
+
+| 명령 | 실행 내용 |
+|---|---|
+| `setup` | `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt` |
+| `run` | `python main.py` |
+| `test` | `python3 -m py_compile *.py && echo 'Syntax check passed'` |
+| `logs` | `tail -20 logs/bot.log 2>/dev/null \|\| echo 'No logs found'` |
+
+**문제점**:
+1. `run` 명령이 **모의/실전을 구분하지 않고 `main.py`를 실행**한다. 현재 `main.py`에는 킬스위치가 없으므로 `.env`가 실전으로 설정돼 있으면 그대로 실전 주문이 나간다. → **제거 또는 모의투자 강제로 바꿔야 함** (사용자 결정).
+2. 이 파일은 **JSON인데 확장자가 `.py`**이고 내용에도 문법 오류가 있다 (21행 `"command": "tail -20 logs/bot.log ...` 문자열 미종결). 셸의 `*.py` 글롭은 dot 디렉터리를 건너뛰므로 `python3 -m py_compile *.py`는 통과하지만, `.claude/commands.py`를 직접 지정하면 `SyntaxError: unterminated string literal`가 난다 (T00에서 실행 확인).
+3. `setup`의 `python3 -m venv`는 CLAUDE.md 규칙(.venv/bin/python만 사용)과 배치되진 않으나, `pip install`을 활성화된 venv에서 하는 것은 전역 pip 사고 위험이 있다(`PIP_REQUIRE_VIRTUALENV`는 unset 금지).
+4. `commands.py`는 Claude Code의 **현재** 커스텀 명령 방식(`.claude/commands/*.md`)이 아니다. 현재 방식으로는 동작하지 않을 가능성이 높다.
+
+## A-6. trading_strategy.py / utils.py 사용 여부
+
+`grep`/import 분석 결과 (2026-10-18):
+
+| 파일 | import하는 곳 | 판정 |
+|---|---|---|
+| `trading_strategy.py` | **없음**. 언급은 문서(`*.md`)에만 존재 | **미사용** |
+| `utils.py` | **없음**. `ai_analyzer.py:17`의 `from email.utils import ...`는 **표준 라이브러리**이며 이 파일과 무관 | **미사용** |
+
+`utils.py:346-357`은 자체 `ConfigManager`에서 `os.getenv`를 다시 읽어 **별도 기본값**을 정의한다:
+- `BUY_RATIO` 기본값 `0.30` (실제 `config.py`는 `0.15`) — **불일치**
+- `TAKE_PROFIT_THRESHOLD`, `DIP_THRESHOLD`, `AI_SCORE_FLOOR` 등 중복 정의
+
+삭제하지 않고 보고만 한다(A-5의 질문 1과 연결).
+
+## A-7. Python 버전 / 의존성
+
+- `.python-version` = `3.12.15`, `.venv/bin/python --version` = `Python 3.12.15` — **일치**
+- `requirements.txt`: 27개 고정 (직접 사용 4개: `requests`, `python-dotenv`, `schedule`, `google-genai`)
+- `pip freeze` 실제: **45개**, `requirements.txt`에 **없는 패키지 18개**:
+
+```
+google-ai-generativelanguage==0.6.15   google-api-core==2.33.0
+google-api-python-client==2.201.0      google-auth-httplib2==0.4.4
+google-generativeai==0.8.6             googleapis-common-protos==1.75.0
+grpcio==1.84.0                         grpcio-status==1.71.2
+httplib2==0.32.0                       packaging==26.3
+proto-plus==1.28.2                     protobuf==5.29.6
+pyparsing==3.3.3                       pytz==2026.5
+setuptools==84.0.0                     tqdm==4.70.1
+uritemplate==4.2.0                     wheel==0.48.0
+```
+
+대부분 **구 SDK `google-generativeai`의 전이 의존성**이다. 1.1.0 이력은 "구 SDK 제거"라고 주장했으나 **실제 `.venv`에는 남아 있다.** 동작에는 영향 없으나, `pip freeze > requirements.txt`를 그대로 실행하면 이 18개가 다시 들어온다.
+
+## A-8. 환경변수 전체 목록 (코드 기준)
+
+`config.py`가 읽는 변수와 기본값 — **README.md의 표와 동일**. 값은 `.env`를 읽지 않고 코드 기본값만 기재했다.
+
+| 변수 | 기본값 | 비고 |
+|---|---|---|
+| `IS_MOCK_TRADING` | `True` | |
+| `KIS_MOCK_APP_KEY` → `KIS_APP_KEY` | 없음 | fallback |
+| `KIS_MOCK_APP_SECRET` → `KIS_APP_SECRET` | 없음 | fallback |
+| `KIS_MOCK_ACCOUNT_NO` → `KIS_ACCOUNT_NO` | 없음 | fallback |
+| `KIS_REAL_APP_KEY` → `KIS_APP_KEY` | 없음 | fallback |
+| `KIS_REAL_APP_SECRET` → `KIS_APP_SECRET` | 없음 | fallback |
+| `KIS_REAL_ACCOUNT_NO` → `KIS_ACCOUNT_NO` | 없음 | fallback |
+| `GEMINI_API_KEY` | 없음 | |
+| `TARGET_TICKER` | `QQQ` | |
+| `TARGET_TICKER_NAME` | `QQQ` | |
+| `IS_OVERSEAS_ENABLED` | 모의 `True` / 실전 `False` | |
+| `IS_DOMESTIC_ENABLED` | `True` | |
+| `DOMESTIC_TICKER` | `379800` | |
+| `DOMESTIC_TICKER_NAME` | `TIGER 미국나스닥100` | |
+| `NEWS_FEEDS` | Google News + Yahoo Finance | |
+| `NEWS_MAX_ITEMS` | `10` | |
+| `NEWS_TIMEOUT_SEC` | `8` | |
+| `BUY_RATIO` | `0.15` | |
+| `DOMESTIC_BUY_RATIO` | `0.10` | |
+| `DIP_THRESHOLD` | `-1.5` | |
+| `USE_INDICATORS` | `True` | |
+| `RSI_PERIOD` | `14` | |
+| `RSI_OVERSOLD` | `30` | |
+| `RSI_OVERBOUGHT` | `70` | |
+| `BB_PERIOD` | `20` | |
+| `BB_NUM_STD` | `2.0` | |
+| `TAKE_PROFIT_THRESHOLD` | `5.0` | **매매 로직에서 미사용** |
+| `AI_SCORE_FLOOR` | `-50` | |
+| `MAX_BUYS_PER_DAY` | `2` | |
+| `MIN_BUY_INTERVAL_HOURS` | `2.0` | |
+| `TAKE_PROFIT_STEPS` | `2.0:33,4.0:33,6.0:100` | |
+| `STOP_LOSS_THRESHOLD` | `-5.0` | |
+
+### 낡은 설정명 / 존재하지 않는 설정명
+
+| 문서에 나온 설정명 | 실제 | 판정 |
+|---|---|---|
+| `TRADING_MODE=paper` | 없음. 실제는 `IS_MOCK_TRADING` | **없는 설정** (CLAUDE.md 규칙 1에 T01 예정으로 기재) |
+| `CONFIRM_LIVE` | 없음 (T01 예정) | **없는 설정** |
+| `TOKEN_CACHE_FILE` | `config.py` 상수. **env로 읽지 않음** (`utils.py:356`만 env로 읽음) | 문서에 env처럼 적힌 곳 있음 → **틀림** |
+| `LOG_FILE` | `config.py` 상수. env로 읽지 않음 (`utils.py:357`만) | **틀림** |
+| `BUY_RATIO=0.30` (구 문서들) | `0.15` (해외) + `DOMESTIC_BUY_RATIO=0.10` | **낡음** |
+| `DOMESTIC_BUY_RATIO=0.20` (DEVELOPMENT-GUIDE, project_summary) | `0.10` | **낡음** |
+| `TAKE_PROFIT_THRESHOLD=5.0` (다수 문서) | 존재하나 **미사용**. 실제 청산은 `TAKE_PROFIT_STEPS` | **낡음** |
+| `MIN_BUY_INTERVAL_HOURS` | `2.0` 존재 | 문서에 거의 없음 → 보완 |
+| `config/universe.yaml` (CLAUDE.md 전략 기본값 표) | **파일 없음** (`config/` 디렉터리 자체가 없음) | **없는 파일** (계획) |
+| `SMA(200)` 진입 필터 (CLAUDE.md 전략 기본값) | 코드에 없음 | **미구현** (계획) |
+
+---
+
+# 부록 B. 문서 감사 (T00-B)
+
+각 md의 "사실 주장"을 코드/실행과 대조한 결과. 판정: **맞음 / 낡음 / 틀림 / 확인불가**
+
+## B-1. README.md (구본, 26KB) — 재작성으로 대체
+
+| 주장 | 실제 | 판정 |
+|---|---|---|
+| "프로덕션급 아키텍처", "포괄적인 예외 관리", "프로덕션 기능" | 자동 테스트 0개, 매도 체결 0건 | **틀림** (증거 없음) |
+| "매수 비율: 총 포트폴리오의 30%" (README:175) | `BUY_RATIO=0.15`, `DOMESTIC_BUY_RATIO=0.10` | **낡음** |
+| "익절: 5% → 전량 매도 / 손절 로직은 미구현" (:22-23) | `TAKE_PROFIT_STEPS`(2/4/6%), 손절 **구현됨** (`STOP_LOSS_THRESHOLD=-5`) | **틀림** |
+| "state.py — 스레드 안전 연산" (:58) | `BotState`에 lock 없음. 싱글 스레드 전제 | **틀림** |
+| "테스트: pytest" (:615) | pytest 미설치, `tests/` 없음 | **틀림** |
+| "린터: flake8, black, isort / mypy" (:613-614) | 미설치, 설정 파일 없음 | **틀림** |
+| 모듈 수 "실행 경로 6개" (:26) vs "7개" (:626) | 실제 실행 경로 8개(config, state, indicators, kis_overseas, kis_domestic, ai_analyzer, trader, main) | **틀림** (문서 내 자기모순) |
+| "시세 조회 `/uapi/overseas-price/v1/quotations/price`" (:184) | `kis_overseas.py:136` 일치 | **맞음** |
+| "일봉 API `/uapi/overseas-price/v1/quotations/dailyprice`" (:188 부근) | `kis_overseas.py:163` 일치 (`inquire-daily-chartprice`는 환율용) | **맞음** |
+| "환율: 두나무 API" (출처: 1.1.0 이력, README 아님 — B-8 참고) | `kis_overseas.py:305` KIS `inquire-daily-chartprice` + `FX@KRW` | **낡음** |
+| `_request()` "모든 호출 전 1초 이상 간격" (:245) | `_MIN_CALL_INTERVAL_SEC=1.0` (`kis_overseas.py:87`) | **맞음** |
+| "미국 휴장일은 별도로 처리하지 않음" (:247) | `main.py:48` 평일+시간만 확인 | **맞음** |
+| "실패 감지: `rt_cd != 0`이면 예외" (:106) | `kis_domestic.py:46` `_check_rt_cd` | **맞음** |
+| "메모리 ~50-100MB, 사이클 1-3분" (:253-258) | 측정 근거 없음 (psutil 미설치) | **확인불가** |
+| 설치/로그 명령 (`python3 -m venv`, `tail -f logs/bot.log`, `ps aux \| grep "python main.py"`) | macOS에서 동작 | **맞음** |
+
+## B-2. TRADING_BOT_README.md — archive
+
+| 주장 | 실제 | 판정 |
+|---|---|---|
+| "분할 매수: 하루 최대 2회" (:152) | `MAX_BUYS_PER_DAY=2` | **맞음** |
+| "부분 익절 +2% 1/3, +4% 1/3, +6% 전량" (:153) | `TAKE_PROFIT_STEPS` 일치 | **맞음** |
+| "손절 -5% 이하 시 전량 매도 (기본 활성)" (:154) | 코드 일치 | **맞음** |
+| "모의투자 전용 정규장 제한, 실전은 시간외 가능" (:164) | `main.py:69-74`는 **모드 구분 없이** 정규장만 허용 | **틀림** |
+| "`free -h` 메모리 사용량" (:285) | macOS에 `free` 없음 | **틀림** |
+| "로그: `grep "buy\|sell" logs/bot.log`" (:303) | 로그 메시지가 한글("매수 주문 완료")이라 매칭 안 됨 | **틀림** |
+| "/trading/order-cash 지정가 `ORD_DVSN=01`" (:104) | `kis_domestic.py:193` 일치 | **맞음** |
+| "매수 `VTTC0802U` / 매도 `VTTC0801U`" (:105) | `kis_domestic.py:21` TR_ID 쌍과 일치 | **맞음** |
+| "토큰 관리: 24시간 유효성" (:62) | `_save_token` 기본 `expires_in_sec=86400` | **맞음** |
+| "안전한 종료: 종료 전 상태 저장" (:251) | 메모리 상태 저장 없음. `KeyboardInterrupt`는 로그만 남김 | **틀림** |
+
+## B-3. run_instructions.md — archive
+
+| 주장 | 실제 | 판정 |
+|---|---|---|
+| `TAKE_PROFIT_THRESHOLD=5.0  # (구) 단일 익절 기준` (:97) | 존재하나 미사용 — 문서 표기는 **정확** | **맞음** |
+| "정규장 아님 로그: `[모의투자] 미국 정규장 아님 — 주문 스킵`" (:213) | 실제 로그는 `[해외] 정규장 아님 — 매매 스킵` | **틀림** |
+| "실전투자는 시간 제한을 적용하지 않음" (:213) | `main.py`는 모드 무관하게 제한 | **틀림** |
+| 환경변수 표 (:263-282) | 값 대부분 코드와 일치. 단 `MIN_BUY_INTERVAL_HOURS`, `USE_INDICATORS`, `RSI_*`, `BB_*`, `NEWS_*`, `IS_OVERSEAS_ENABLED` 누락 | **부분 맞음** |
+| "KIS_ACCOUNT_NO 필수: 예" (:268) | 코드는 경고만 하고 진행 | **틀림** |
+| "`python setup.py`" (이력) | `setup.py` 없음 | **틀림** |
+| "포트가 이미 사용 중" 문제 항목 (:318) | 이 봇은 포트를 열지 않음(스케줄러) | **틀림** |
+| "옵션 B: 전역 설치" (:47-51) | CLAUDE.md 위반 (전역 pip 금지) | **틀림** |
+| 임포트 테스트 스크립트 (:136-185) | 유효 (`main` import 포함) | **맞음** |
+
+## B-4. DEVELOPMENT-GUIDE.md — docs/DEVELOPMENT.md로 대체
+
+| 주장 | 실제 | 판정 |
+|---|---|---|
+| "상태: 프로덕션 준비 완료" | 증거 없음 | **틀림** |
+| "`BUY_RATIO=0.30`" (:128) | `0.15` | **낡음** |
+| "`DOMESTIC_BUY_RATIO=0.20`" (:500) | `0.10` | **낡음** |
+| "state.py — 스레드 안전 연산" (:200) | lock 없음 | **틀림** |
+| "`free -h`, `df -h`, `uptime`" (:602-605) | `free`는 macOS에 없음 | **틀림** |
+| 커밋 템플릿 `<base62-sha> <메시지>` (:547) | 의미 없는 자리표시자 | **틀림** |
+| "`Co-authored-by: Claude Code`" (:549) | 현재 규칙은 `Co-Authored-By: Claude Code <noreply@anthropic.com>` | **낡음** |
+| "테스트 코드 없음 (`tests/`, pytest)" (:287) | 사실 | **맞음** |
+| "kis_domestic 구현 완료 + TR_ID" (:491-493) | 코드 일치 | **맞음** |
+| "`pip freeze > requirements.txt`" (:89) | 동작하나 구 SDK 전이 의존성이 부활 (A-7) | **부분 맞음** |
+| "psutil 메모리 클래스" (:388-404) | psutil 미설치 | **틀림** |
+| "import config / CONFIG 상수" (:627) | `config.CONFIG` 없음 | **틀림** |
+| 브랜치/커밋 유형 표 (:551-566) | 유효 (내용은 타당) | **맞음** (재작성 시 채택) |
+
+## B-5. TROUBLESHOOTING.md — docs/TROUBLESHOOTING.md로 대체
+
+| 주장 | 실제 | 판정 |
+|---|---|---|
+| `source .env/bin/activate` (:133) | 오타 — `.venv` | **틀림** |
+| "`cat .env`로 확인" (:105) | CLAUDE.md 규칙 2 위반 (비밀값 출력) | **틀림** |
+| "`cat .env \| grep -E '(KIS_APP_KEY\|...)'`" (:241) | 값이 그대로 출력됨 | **틀림** |
+| "`BUY_RATIO=0.30`" (:90) | `0.15` | **낡음** |
+| "`TAKE_PROFIT_THRESHOLD=5.0`" (:92) | 존재하나 미사용 | **낡음** |
+| "`.env` 생성용 heredoc 템플릿" (:73-94) | 유효하나 낡은 값 포함 | **부분 맞음** |
+| "옵션 B: 전역 설치" (:46-49) | CLAUDE.md 위반 | **틀림** |
+| 임포트 테스트, 권한 설정, 프로세스 종료 | 유효 | **맞음** |
+| "`python3 -c "import psutil..."`" (없음) | 미설치 | — |
+
+## B-6. project_summary.md — archive
+
+| 주장 | 실제 | 판정 |
+|---|---|---|
+| "프로젝트 상태: ✅ 완료" (:7) | 매도 체결 0건, 테스트 0개 | **틀림** |
+| "상태: 프로덕션 준비 완료" (:425) | 같은 문서에서 "모의투자 검증 단계"(:418) — 자기모순 | **틀림** |
+| "매도 조건: 익절만 구현, 손절은 미구현" (:25, :128) | 손절 구현됨 | **틀림** |
+| "동적 포지션 크기 조정 (거래당 30%)" (:27) | 15%/10% 고정, 동적 아님 | **틀림** |
+| "`BUY_RATIO: 0.30` / `DOMESTIC_BUY_RATIO: 0.20`" (:225-226) | `0.15`/`0.10` | **낡음** |
+| "`TAKE_PROFIT_THRESHOLD: 5.0`" (:228) | 미사용 | **낡음** |
+| "요청 제한: 내장 지연 (호출 간 0.5초)" (:158) | `_MIN_CALL_INTERVAL_SEC=1.0` | **낡음** |
+| 코드 라인 수 표 (:192-201) | 실제 다름 (config 63→106, state 46→82, trader 196→352, main 192→179, kis_overseas 364→393, kis_domestic 200→225, ai_analyzer 93→339) | **낡음** |
+| "자동 테스트 없음" (:203) | 사실 | **맞음** |
+| "`def run_trading_cycle(ai_score: int)`" (:87) | 실제 시그니처는 `(ai_score, overseas_open=True, domestic_open=True)` | **낡음** |
+| KIS 국내 엔드포인트 4개 (:255-258) | `kis_domestic.py`와 일치 | **맞음** |
+
+## B-7. REVIEW_PROMPT.md — archive (보존 가치 있음)
+
+이 문서는 **다른 AI에게 리뷰를 요청하는 프롬프트**로, 자기 자신이 "완료"를 주장하지 않는다.
+기재된 전략 수치·한계는 코드와 대체로 일치하며, **모의투자 4일 로그 분석과 3년 백테스트 결과**라는
+다른 문서에 없는 사실 정보를 담고 있어 `docs/archive/`에 보존한다.
+
+| 주장 | 실제 | 판정 |
+|---|---|---|
+| "매수 7회 시도 중 4건 장시작전/장종료 거부" (:58) | `logs/bot.log`에 관련 거부 4건 존재 — **일치** | **맞음** |
+| "매도는 단 한 번도 체결된 적 없음" (:58) | 로그상 매도 주문 실행 0건 | **맞음** |
+| "RSI+BB 신호 3년간 8회, 승률 87.5%" (:65) | 백테스트 스크립트가 저장소에 없음 → 재현 불가 | **확인불가** |
+| 백테스트 스크립트 위치 | 문서에 없음 | **확인불가** |
+| 나머지 전략 수치 (RSI 30, BB 2σ, 손절 -5%, 단계 2/4/6%) | `config.py` 일치 | **맞음** |
+
+## B-8. .claude/CHANGES-LOG.md — docs/CHANGES.md로 이관
+
+콘텐츠 자체가 이력이므로 위 "이관된 이력" 절에 원문을 보존했다. 감사 결과:
+- "손절 미구현" 주장 → **틀림**
+- "구 SDK 제거" 주장 → `.venv`에 잔존 → **부분 틀림** (A-7)
+- "환율 두나무 API" → **낡음**
+- "Version 1.0.0 Status: Production Ready" → **틀림** (증거 없음)
+- 나머지(V1.1.0 문서 정정 항목, 의존성 정리)는 당시 작업 기록으로 유효
+
+## B-9. CLAUDE.md (교체본) — 수정
+
+| 주장 | 실제 | 판정 |
+|---|---|---|
+| 모듈 구조 8개 | 실제 import 관계와 일치 | **맞음** |
+| "매도 체결 0건" | 로그 확인 | **맞음** |
+| "`try/except: pass` 금지" 규칙 | `indicators.py:114` `evaluate_or_none`이 예외를 삼킴(`logger.warning` 후 None) | **부분 위반** — 로그는 남기므로 완전 위반은 아님. T01 확인 필요 |
+| "주문 API 자동 재시도 금지" | `kis_overseas._request`가 주문에도 재시도 적용 (`max_attempts=3`) | **위반 상태** — T01 대상 |
+| 전략 기본값 표 (SMA200, +3/-3%, 7거래일, 유니버스 yaml) | 코드에 전혀 없음 | **미구현** (계획으로 명시함) |
