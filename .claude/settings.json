@@ -1,0 +1,10 @@
+{
+    "permissions": {
+        "deny": [
+            "Read(./token_cache*.json)",
+            "Bash(.venv/bin/python main.py:*)",
+            "Bash(python main.py:*)",
+            "Bash(python3 main.py:*)"
+        ]
+    }
+}
