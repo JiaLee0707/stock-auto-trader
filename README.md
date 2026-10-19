@@ -10,7 +10,7 @@ macOS 로컬에서 `schedule`로 1시간 주기 실행.
 - 매도 체결이 **한 번도 발생한 적이 없음** — 익절/손절 로직이 실제로 발동한 실적 없음
 - 이 사실은 `logs/bot.log`로 확인 가능. 2026-10-18 기준 "매도"가 들어간 줄 39건 중 13건이 `매도 조건 미충족`이고, 매도 주문 실행 기록은 0건이다 (`grep -cE "매도 주문 완료" logs/bot.log` → 0, 매수 주문 완료는 9건)
 - 자동화 테스트는 **T01에서 최소 도입** (pytest, `tests/`, 37개). 지표 특성화와 실전 가드만 덮으며 매매 판단 전체를 검증하지는 않음
-- 실전 가드(`TRADING_MODE`/`CONFIRM_LIVE`)가 **T01에서 추가됨**. `TRADING_MODE=live`이고 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면 시작 즉시 종료 (`tests/test_live_guard.py`)
+- 실전 가드가 **T01/T01b에서 추가됨**. `IS_MOCK_TRADING=false`(실전)이고 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면 시작 즉시 종료하며, 주문 함수 4개도 직접 호출 시 차단 (`tests/test_live_guard.py`)
 
 상세한 배경과 근거는 [docs/archive/REVIEW_PROMPT.md](docs/archive/REVIEW_PROMPT.md) 참고.
 
@@ -34,9 +34,9 @@ Python 버전: `.python-version` = `3.12.15`
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `TRADING_MODE` | `paper` | `paper`/`live`. 시작 로그 첫 줄에 출력됨. `live`는 아래 확인값 필수 (T01) |
-| `CONFIRM_LIVE` | (없음) | `live`일 때 `YES_I_UNDERSTAND`여야 시작. 없으면 즉시 종료 (T01) |
-| `IS_MOCK_TRADING` | `True` | `True`=모의투자(openapivts:29443), `False`=실전(openapi:9443) |
+| `IS_MOCK_TRADING` | `True` | **모드 판정의 유일한 기준.** `true`/`false`(대소문자 무시)만 허용. 그 외 값이면 즉시 종료. `true`=모의(openapivts:29443), `false`=실전(openapi:9443) |
+| `CONFIRM_LIVE` | (없음) | `IS_MOCK_TRADING=false`(실전)일 때 `YES_I_UNDERSTAND`여야 시작·주문. 없으면 즉시 종료 (T01b) |
+| `TRADING_MODE` | (유도값) | **모드 판정에 쓰지 않음.** 표시용 읽기 전용 값으로 `IS_MOCK_TRADING`에서 유도(`paper`/`live`). 환경변수로 다른 값을 넣으면 즉시 종료 (T01b) |
 | `KIS_MOCK_APP_KEY` / `KIS_APP_KEY` | (없음) | 모의투자 앱키. `KIS_MOCK_*` 우선, 없으면 `KIS_APP_KEY` fallback |
 | `KIS_MOCK_APP_SECRET` / `KIS_APP_SECRET` | (없음) | 모의투자 시크릿 |
 | `KIS_MOCK_ACCOUNT_NO` / `KIS_ACCOUNT_NO` | (없음) | 모의투자 계좌번호 (`XXXXXXXX-XX`) |
@@ -80,8 +80,15 @@ Python 버전: `.python-version` = `3.12.15`
 ```
 
 시작 즉시 1회 실행 후 1시간 주기로 반복합니다. `Ctrl+C`로 종료.
+시작 로그 첫 줄에 현재 모드와 도메인 호스트명이 찍힙니다(키·계좌번호는 출력하지 않음).
 
-**주의**: 실전 주문을 막는 킬스위치가 아직 없습니다(T01 예정). 실행 전 `IS_MOCK_TRADING=True`인지 반드시 확인하세요.
+```bash
+grep "현재 모드" logs/bot.log | tail -1    # 예: 🔒 현재 모드: 모의 | 도메인: openapivts.koreainvestment.com
+```
+
+**실전 가드**: `IS_MOCK_TRADING=false`(실전)인데 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면
+어떤 API 호출보다 먼저 종료합니다. 또한 주문 함수 4개가 각자 시작 시 같은 검사를 하므로,
+`main()`을 거치지 않고 직접 호출돼도 주문이 나가지 않습니다.
 
 ### 로그 확인
 
@@ -101,21 +108,26 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 
 ## 모의 ↔ 실전 전환
 
-`.env`에서 `IS_MOCK_TRADING` 값을 바꿉니다.
+모드 판정은 **`IS_MOCK_TRADING` 하나로만** 합니다(대소문자 무시, 앞뒤 공백 무시).
+허용값은 `true`/`false`뿐이며, 그 외 값(오타·`0`·`yes` 등)이면 조용히 실전으로 넘어가지 않고 즉시 종료합니다.
+미설정이면 `true`(모의)입니다.
 
 | | 모의투자 | 실전투자 |
 |---|---|---|
-| `IS_MOCK_TRADING` | `True` | `False` |
+| `IS_MOCK_TRADING` | `true` | `false` |
+| `CONFIRM_LIVE` | 불필요 | **`YES_I_UNDERSTAND` 필수** (없으면 종료) |
 | KIS 도메인 | openapivts:29443 | openapi:9443 |
 | 토큰 캐시 | `token_cache_mock.json` | `token_cache_real.json` |
-| `IS_OVERSEAS_ENABLED` 기본값 | `True` | `False` |
+| `IS_OVERSEAS_ENABLED` 기본값 | `true` | `false` |
 | 주문 가능 시간 | 국내 09:00~15:30 KST / 해외 09:30~16:00 ET 정규장만 | 정규장만 (코드가 동일하게 제한) |
 | 매도 TR_ID (해외) | `VTTS0308U` | `TTTS0308U` |
 | 매수 TR_ID (해외) | `VTTT1002U` | `TTTT1002U` |
 
+`TRADING_MODE`는 모드 판정에 쓰이지 않습니다. `IS_MOCK_TRADING`에서 유도한 표시용 값이며,
+환경변수로 다른 값을 넣으면 조용히 무시하지 않고 **즉시 종료**합니다(모드 판정이 두 곳으로 갈라지는 것을 막기 위함).
+
 **경고**
-- 실전 전환은 **현재 금지**입니다. 매도 체결 실적 0건, 자동 테스트 없음, 킬스위치 없음 상태입니다.
-- 실전 계좌로 전환하면 예외 없이 실제 주문이 나갈 수 있습니다.
+- 실전 전환은 **현재 금지**입니다. 매도 체결 실적 0건, 매매 판단 로직에 대한 자동 테스트 없음 상태입니다.
 - 전환 시 해외·국내 TR_ID 분기가 자동으로 바뀌지만, 이 분기가 실전 계좌에서 검증된 적은 없습니다 (`# VERIFY`).
 
 ## 문서 지도

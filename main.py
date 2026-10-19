@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from datetime import datetime, time as dtime
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import schedule
@@ -149,8 +150,12 @@ def quick_test():
 
 
 def main():
-    # 실전 가드: 로그 첫 줄에 TRADING_MODE를 남기고, 위반 시 즉시 종료 (T01)
-    logger.info(f"🔒 TRADING_MODE={config.TRADING_MODE}")
+    # 시작 로그 첫 줄: 현재 모드와 도메인 호스트명. 키·계좌번호는 출력하지 않는다 (T01b)
+    mode_label = "모의" if config.IS_MOCK else "실전"
+    host = urlsplit(config.KIS_BASE_URL).hostname or "(unknown)"
+    logger.info(f"🔒 현재 모드: {mode_label} | 도메인: {host}")
+
+    # 실전 가드: 위반 시 어떤 API 호출보다 먼저 종료 (T01b)
     config.enforce_trading_mode()
 
     env_mode = "모의투자" if config.IS_MOCK else "실전투자"

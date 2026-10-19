@@ -870,3 +870,80 @@ uritemplate==4.2.0                     wheel==0.48.0
 - `TRADING_MODE` 관련 문서는 `README.md` 환경변수 표가 단일 출처다. 중복 서술 금지.
 - 부록 B-9의 두 항목은 이 보고 4-1·4-2로 **재분류(T04/T01 대상)** 되었다. B-9의 "T01 대상" 표기는
   이 절을 가리키는 것으로 본다.
+
+---
+
+# T01b — 실전 가드 보강 (모드 판정의 단일화) (2026-10-18)
+
+브랜치: `improve/t01b-live-guard` / 베이스: `improve/t01-baseline`
+
+## 1. 완료 여부
+
+**완료.** 모드 판정을 `IS_MOCK_TRADING` 하나로 단일화하고, 엄격 파싱·주문 함수 방어선·테스트·문서를
+모두 처리했다. 매매 판단 로직은 바꾸지 않았다.
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 |
+|---|---|
+| `config.py` | `resolve_is_mock()`/`_load_is_mock()` 추가. `IS_MOCK`을 엄격 파싱(허용값 `true`/`false`만, 그 외 `SystemExit`). `TRADING_MODE`는 `IS_MOCK`에서 유도한 **읽기 전용** 값으로 변경, 다른 env 값이 있으면 `check_trading_mode_env()`가 즉시 종료(후속 수정). `live_guard_error()`가 `trading_mode` 대신 `is_mock`을 받도록 시그니처 변경. `assert_order_allowed()` 추가 |
+| `main.py` | 시작 로그 첫 줄을 `현재 모드: 모의/실전 \| 도메인: <host>`로 변경(`urlsplit` 사용). `enforce_trading_mode()`는 그대로 매매 사이클 이전 |
+| `kis_overseas.py` | `buy_shares`, `sell_all` 맨 앞에 `config.assert_order_allowed()` |
+| `kis_domestic.py` | `buy_domestic`, `sell_domestic_all` 맨 앞에 `config.assert_order_allowed()` |
+| `tests/test_live_guard.py` | T01 판을 새 규칙에 맞게 **전면 교체** (가드 행렬·엄격 파싱·주문 함수 직접 호출·main 종료) |
+| `README.md` | 환경변수 표·실전 가드·모드 전환 절을 `IS_MOCK_TRADING` 기준으로 수정 |
+| `CLAUDE.md` | 규칙 1, "현재 알려진 문제"의 킬스위치 항목 수정 |
+| `docs/CHANGES.md` | 이 보고 |
+
+**공개 시그니처 변경**: `config.live_guard_error(trading_mode, confirm_live)` →
+`config.live_guard_error(is_mock, confirm_live)`. 인자 의미가 바뀌었으므로 위와 같이 명시한다.
+
+## 3. 테스트 결과
+
+```
+.venv/bin/python -m pytest
+70 passed in 0.39s
+```
+
+신규 설치 없음(pytest는 T01에서 설치). 테스트는 다음을 포함한다:
+
+| 요구 | 테스트 |
+|---|---|
+| (IS_MOCK, CONFIRM_LIVE) 4조합 | `test_guard_matrix` (파라미터 4케이스) |
+| IS_MOCK_TRADING 9가지 값 | `test_resolve_is_mock_valid_values`(true/TRUE/True/공백 true/false/FALSE/False/공백 false), `test_resolve_is_mock_rejects_invalid_values`(ture/0/yes/true1/fals/빈 문자열/공백/1/y), `test_load_is_mock_exits_on_invalid_value` |
+| 미설정 → 모의 | `test_load_is_mock_defaults_to_true_when_unset` |
+| 주문 함수 4개 직접 호출 차단 | `test_overseas_buy_blocked_before_http`, `test_overseas_sell_blocked_before_http`, `test_domestic_buy_blocked_before_http`, `test_domestic_sell_blocked_before_http` — `_request`를 스파이로 바꿔 **호출 0회**를 단언 |
+| main()이 매매 사이클 이전 종료 | `test_main_exits_before_trading_when_live_unconfirmed` (유지) |
+| 시작 로그 모드·호스트명 | `test_main_start_log_shows_mode_and_host` |
+
+## 4. 확인하지 못한 항목 (VERIFY)
+
+| # | 항목 | 사유 |
+|---|---|---|
+| V1 | 실전 계좌에서의 실제 차단 동작 | 실전 계좌 없음. `IS_MOCK=False`는 monkeypatch로만 검증 |
+| V2 | `IS_MOCK_TRADING` 오타 값이 `.env`에 있을 때의 실제 기동 | import 시점 `SystemExit`이므로 `main.py` 실행 없이는 실측 불가(T01b에서 main 미실행) |
+| V3 | T01의 V1(일봉 미확정 봉), V3(실전 TR_ID), V4(마스킹 적용 지점) | 이번 Task와 무관, 미해결 유지 |
+
+## 5. 사용자가 결정해야 할 질문
+
+1. **`SystemExit` vs 예외** — 잘못된 `IS_MOCK_TRADING` 값은 `config` import 시점에 `SystemExit`를
+   던진다. 따라서 `config`를 import하는 **테스트·도구도** 그 환경에서는 함께 죽는다. 별도 예외
+   클래스(`ConfigError`)로 바꿔 잡을 수 있게 할지, 지금처럼 즉시 종료할지 결정 필요.
+2. ~~**`TRADING_MODE` 환경변수 처리**~~ — **해결됨(후속 수정, 2026-10-18).** 사용자 지시로
+   "경고 후 무시"에서 "불일치 시 즉시 종료"로 변경했다(`config.check_trading_mode_env()`).
+   관련 테스트 14개 추가.
+3. **`assert_order_allowed()`의 예외 종류** — `RuntimeError`로 던진다. `trader.py`의 주문 호출부는
+   `except Exception`으로 잡아 로그만 남기므로, 실전 가드 위반이 "주문 실패"로 삼켜질 수 있다.
+   전용 예외로 올려 상위에서 구분할지 결정 필요.
+
+## 6. 다음 Task에 영향을 주는 사항
+
+- **모드 판정 출처는 `config.IS_MOCK` 하나다.** 이후 Task에서 `TRADING_MODE`를 조건문에 쓰지 말 것
+  (T01b 후 `grep`으로 코드상 사용처 0건 확인 — `main.py`는 로그에만, `config.py`는 유도·경고에만).
+- `config.live_guard_error`의 인자가 `is_mock`으로 바뀌었다. 이 함수를 쓰는 코드는 시그니처를 확인할 것.
+- 주문 함수 4개는 이제 첫 줄에서 `assert_order_allowed()`를 호출한다. 주문 함수에 다른 사전 검증을
+  추가할 때 이 호출보다 **뒤**에 두면 안 된다(가드가 먼저 와야 한다).
+- `tests/test_live_guard.py`는 T01 판을 대체했다. T01 보고서의 "테스트 37개"는 이제 85개이며,
+  T01 보고 3항의 개수는 T01 시점 값으로 읽어야 한다.
+- `TRADING_MODE` 환경변수는 이제 **일치하지 않으면 종료 사유**다. `.env`에 남아 있다면
+  `IS_MOCK_TRADING`과 일치하는지 확인하고, 아니라면 제거할 것.

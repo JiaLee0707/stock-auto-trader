@@ -335,6 +335,9 @@ def buy_shares(quantity: int, price_usd: float) -> dict:
     if quantity <= 0:
         raise ValueError(f"매수 수량은 1주 이상이어야 합니다: {quantity}")
 
+    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b)
+    config.assert_order_allowed()
+
     # 모의: VTTT1002U, 실전: TTTT1002U (해외주식 매수주문)
     tr_id = "VTTT1002U" if config.IS_MOCK else "TTTT1002U"
     url = f"{config.KIS_BASE_URL}/uapi/overseas-stock/v1/trading/order"
@@ -366,6 +369,9 @@ def buy_shares(quantity: int, price_usd: float) -> dict:
 
 def sell_all(quantity: float, current_price_usd: float) -> dict:
     """보유 수량 전량 시장가 매도."""
+    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b)
+    config.assert_order_allowed()
+
     tr_id = "VTTS0308U" if config.IS_MOCK else "TTTS0308U"
     url = f"{config.KIS_BASE_URL}/uapi/overseas-stock/v1/trading/order"
 

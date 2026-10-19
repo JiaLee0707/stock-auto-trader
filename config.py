@@ -8,34 +8,106 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 기본값 설정
-IS_MOCK = os.getenv("IS_MOCK_TRADING", "True").lower() == "true"
-
-# ── 실전 가드 (T01) ─────────────────────────────────────
-# TRADING_MODE 기본값은 paper. live 인데 CONFIRM_LIVE 확인값이 없으면 시작하지 않는다.
-TRADING_MODE = os.getenv("TRADING_MODE", "paper").strip().lower()
-CONFIRM_LIVE = os.getenv("CONFIRM_LIVE", "")
+# ── 모드 판정 (T01b: IS_MOCK_TRADING 단일 기준) ──────────
+# 모의/실전 판정은 IS_MOCK_TRADING 하나로만 한다.
+# 허용값은 true/false(대소문자 무시)뿐이며, 그 외 값은 조용히 실전으로 넘어가지 않고 종료한다.
 _LIVE_CONFIRM_VALUE = "YES_I_UNDERSTAND"
 
 
-def live_guard_error(trading_mode: str, confirm_live: str) -> str | None:
-    """live 모드인데 확인값이 없으면 오류 메시지를, 아니면 None을 돌려준다."""
-    if trading_mode != "live":
+def resolve_is_mock(raw: str | None) -> bool | None:
+    """
+    IS_MOCK_TRADING 문자열을 모의 여부로 해석한다.
+
+    반환: True(모의) / False(실전) / None(허용되지 않는 값).
+    "true"/"false" 만 허용하며 대소문자·앞뒤 공백은 무시한다.
+    미설정(None)은 모의(True)가 기본값이지만, 여기서는 호출부가 기본값을 채운다.
+    """
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def _load_is_mock() -> bool:
+    """환경변수를 읽어 모의 여부를 확정한다. 값이 잘못되면 로그 후 즉시 종료한다."""
+    raw = os.getenv("IS_MOCK_TRADING", "True")
+    resolved = resolve_is_mock(raw)
+    if resolved is None:
+        message = (
+            f"IS_MOCK_TRADING 값이 올바르지 않습니다: {raw!r}. "
+            "true 또는 false 만 허용합니다(대소문자 무시). "
+            "잘못된 값으로 실전 주문이 나가지 않도록 종료합니다."
+        )
+        logging.getLogger("bot").critical(message)
+        # 로깅이 아직 설정되지 않았어도 이유가 보이도록 SystemExit 메시지로도 남긴다.
+        raise SystemExit(message)
+    return resolved
+
+
+IS_MOCK = _load_is_mock()
+
+# TRADING_MODE 는 모드 판정에 쓰지 않는다. 표시용으로만 IS_MOCK 에서 유도한다.
+TRADING_MODE = "paper" if IS_MOCK else "live"
+
+
+def check_trading_mode_env(derived_mode: str, raw: str | None) -> None:
+    """
+    TRADING_MODE 가 유도값과 충돌하면 즉시 종료한다.
+
+    모드 판정이 두 곳으로 갈라지면 오설정이 실전 오발주로 이어질 수 있으므로,
+    어긋난 값을 무시하지 않고 시작 단계에서 멈춘다.
+    """
+    if raw is None:
+        return
+    value = raw.strip().lower()
+    if not value or value == derived_mode:
+        return
+    message = (
+        f"TRADING_MODE={value!r} 가 IS_MOCK_TRADING 에서 유도한 모드({derived_mode!r})와 다릅니다. "
+        "모드 판정은 IS_MOCK_TRADING 하나로만 하므로, 혼동을 막기 위해 종료합니다. "
+        "TRADING_MODE 환경변수를 제거하거나 IS_MOCK_TRADING 과 일치시키세요."
+    )
+    logging.getLogger("bot").critical(message)
+    raise SystemExit(message)
+
+
+check_trading_mode_env(TRADING_MODE, os.getenv("TRADING_MODE"))
+
+CONFIRM_LIVE = os.getenv("CONFIRM_LIVE", "")
+
+
+def live_guard_error(is_mock: bool, confirm_live: str) -> str | None:
+    """실전 모드인데 확인값이 없으면 오류 메시지를, 아니면 None을 돌려준다."""
+    if is_mock:
         return None
     if confirm_live == _LIVE_CONFIRM_VALUE:
         return None
     return (
-        "TRADING_MODE=live 인데 CONFIRM_LIVE=YES_I_UNDERSTAND 가 없습니다. "
-        "실전 주문을 막기 위해 즉시 종료합니다."
+        f"IS_MOCK_TRADING=False(실전) 인데 CONFIRM_LIVE={_LIVE_CONFIRM_VALUE} 가 없습니다. "
+        "실전 주문을 막기 위해 종료합니다."
     )
 
 
 def enforce_trading_mode() -> None:
     """가드 위반 시 로그를 남기고 SystemExit로 즉시 종료한다."""
-    error = live_guard_error(TRADING_MODE, CONFIRM_LIVE)
+    error = live_guard_error(IS_MOCK, CONFIRM_LIVE)
     if error:
         logging.getLogger("bot").critical(error)
         raise SystemExit(1)
+
+
+def assert_order_allowed() -> None:
+    """
+    주문 직전 방어선. 실전 모드인데 확인값이 없으면 예외를 던진다.
+    main() 을 거치지 않고 주문 함수가 직접 호출돼도 주문이 나가지 않게 한다.
+    """
+    error = live_guard_error(IS_MOCK, CONFIRM_LIVE)
+    if error:
+        raise RuntimeError(error)
 
 
 def mask(value, keep: int = 4) -> str:

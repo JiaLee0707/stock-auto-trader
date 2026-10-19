@@ -184,6 +184,9 @@ def buy_domestic(ticker: str, quantity: int, price: float) -> dict:
     if quantity <= 0:
         raise ValueError(f"매수 수량은 1주 이상이어야 합니다: {quantity}")
 
+    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b)
+    config.assert_order_allowed()
+
     cano, prdt = _account()
     url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash"
     body = {
@@ -207,6 +210,9 @@ def sell_domestic_all(ticker: str, quantity: int, price: float) -> dict:
     """국내 ETF 전량 지정가 매도."""
     if quantity <= 0:
         raise ValueError(f"매도 수량은 1주 이상이어야 합니다: {quantity}")
+
+    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b)
+    config.assert_order_allowed()
 
     cano, prdt = _account()
     url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash"
