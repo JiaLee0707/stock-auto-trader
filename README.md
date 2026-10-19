@@ -9,8 +9,8 @@ macOS 로컬에서 `schedule`로 1시간 주기 실행.
 
 - 매도 체결이 **한 번도 발생한 적이 없음** — 익절/손절 로직이 실제로 발동한 실적 없음
 - 이 사실은 `logs/bot.log`로 확인 가능. 2026-10-18 기준 "매도"가 들어간 줄 39건 중 13건이 `매도 조건 미충족`이고, 매도 주문 실행 기록은 0건이다 (`grep -cE "매도 주문 완료" logs/bot.log` → 0, 매수 주문 완료는 9건)
-- 자동화 테스트(`tests/`, pytest)가 **없음**. 검증은 구문 검사(`py_compile`)와 모의투자 실행 로그뿐
-- 실전 모드를 막는 킬스위치(`CONFIRM_LIVE`)가 **아직 구현되지 않음** (CLAUDE.md 규칙 1, T01 예정)
+- 자동화 테스트는 **T01에서 최소 도입** (pytest, `tests/`, 37개). 지표 특성화와 실전 가드만 덮으며 매매 판단 전체를 검증하지는 않음
+- 실전 가드(`TRADING_MODE`/`CONFIRM_LIVE`)가 **T01에서 추가됨**. `TRADING_MODE=live`이고 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면 시작 즉시 종료 (`tests/test_live_guard.py`)
 
 상세한 배경과 근거는 [docs/archive/REVIEW_PROMPT.md](docs/archive/REVIEW_PROMPT.md) 참고.
 
@@ -34,6 +34,8 @@ Python 버전: `.python-version` = `3.12.15`
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
+| `TRADING_MODE` | `paper` | `paper`/`live`. 시작 로그 첫 줄에 출력됨. `live`는 아래 확인값 필수 (T01) |
+| `CONFIRM_LIVE` | (없음) | `live`일 때 `YES_I_UNDERSTAND`여야 시작. 없으면 즉시 종료 (T01) |
 | `IS_MOCK_TRADING` | `True` | `True`=모의투자(openapivts:29443), `False`=실전(openapi:9443) |
 | `KIS_MOCK_APP_KEY` / `KIS_APP_KEY` | (없음) | 모의투자 앱키. `KIS_MOCK_*` 우선, 없으면 `KIS_APP_KEY` fallback |
 | `KIS_MOCK_APP_SECRET` / `KIS_APP_SECRET` | (없음) | 모의투자 시크릿 |

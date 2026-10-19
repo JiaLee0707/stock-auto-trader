@@ -149,6 +149,10 @@ def quick_test():
 
 
 def main():
+    # 실전 가드: 로그 첫 줄에 TRADING_MODE를 남기고, 위반 시 즉시 종료 (T01)
+    logger.info(f"🔒 TRADING_MODE={config.TRADING_MODE}")
+    config.enforce_trading_mode()
+
     env_mode = "모의투자" if config.IS_MOCK else "실전투자"
     logger.info(f"🚀 나스닥 스노우볼 봇 시작 [{env_mode}] — 대상: {config.TARGET_TICKER}")
 

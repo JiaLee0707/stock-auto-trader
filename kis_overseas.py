@@ -390,5 +390,5 @@ def sell_all(quantity: float, current_price_usd: float) -> dict:
         raise RuntimeError(
             f"해외 매도 주문 실패 [{result.get('msg_cd')}] {result.get('msg1', '').strip()}"
         )
-    logger.info(f"전량 매도 주문 완료: {quantity}주 → {result}")
+    logger.info(f"전량 매도 주문 완료: {quantity}주 → rt_cd={result.get('rt_cd')} {result.get('msg1', '').strip()}")
     return result

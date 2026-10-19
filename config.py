@@ -11,6 +11,42 @@ load_dotenv()
 # 기본값 설정
 IS_MOCK = os.getenv("IS_MOCK_TRADING", "True").lower() == "true"
 
+# ── 실전 가드 (T01) ─────────────────────────────────────
+# TRADING_MODE 기본값은 paper. live 인데 CONFIRM_LIVE 확인값이 없으면 시작하지 않는다.
+TRADING_MODE = os.getenv("TRADING_MODE", "paper").strip().lower()
+CONFIRM_LIVE = os.getenv("CONFIRM_LIVE", "")
+_LIVE_CONFIRM_VALUE = "YES_I_UNDERSTAND"
+
+
+def live_guard_error(trading_mode: str, confirm_live: str) -> str | None:
+    """live 모드인데 확인값이 없으면 오류 메시지를, 아니면 None을 돌려준다."""
+    if trading_mode != "live":
+        return None
+    if confirm_live == _LIVE_CONFIRM_VALUE:
+        return None
+    return (
+        "TRADING_MODE=live 인데 CONFIRM_LIVE=YES_I_UNDERSTAND 가 없습니다. "
+        "실전 주문을 막기 위해 즉시 종료합니다."
+    )
+
+
+def enforce_trading_mode() -> None:
+    """가드 위반 시 로그를 남기고 SystemExit로 즉시 종료한다."""
+    error = live_guard_error(TRADING_MODE, CONFIRM_LIVE)
+    if error:
+        logging.getLogger("bot").critical(error)
+        raise SystemExit(1)
+
+
+def mask(value, keep: int = 4) -> str:
+    """비밀값·계좌번호를 마스킹한다. 뒤 keep자리만 남기고 나머지는 *로 가린다."""
+    if value is None:
+        return ""
+    text = str(value)
+    if len(text) <= keep:
+        return "*" * len(text)
+    return "*" * (len(text) - keep) + text[-keep:]
+
 # KIS 도메인 자동 전환
 KIS_BASE_URL = (
     "https://openapivts.koreainvestment.com:29443"  # 모의투자

@@ -736,3 +736,137 @@ uritemplate==4.2.0                     wheel==0.48.0
 | "`try/except: pass` 금지" 규칙 | `indicators.py:114` `evaluate_or_none`이 예외를 삼킴(`logger.warning` 후 None) | **부분 위반** — 로그는 남기므로 완전 위반은 아님. T01 확인 필요 |
 | "주문 API 자동 재시도 금지" | `kis_overseas._request`가 주문에도 재시도 적용 (`max_attempts=3`) | **위반 상태** — T01 대상 |
 | 전략 기본값 표 (SMA200, +3/-3%, 7거래일, 유니버스 yaml) | 코드에 전혀 없음 | **미구현** (계획으로 명시함) |
+
+---
+
+# T01 — 사전 조사 및 안전망 (2026-10-18)
+
+브랜치: `improve/t01-baseline` / 베이스: `improve/t00-docs`
+
+## 1. 완료 여부
+
+**완료.** 조사·pytest 환경·실전 가드·마스킹·특성화 테스트를 모두 처리했다. 매매 판단 로직은
+바꾸지 않았다(가드와 마스킹, 로그 1줄만 변경).
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 |
+|---|---|
+| `config.py` | `TRADING_MODE`(기본 `paper`), `CONFIRM_LIVE`, `live_guard_error()`, `enforce_trading_mode()`, `mask()` 추가 |
+| `main.py` | `main()` 진입 시 `TRADING_MODE` 로그 + `enforce_trading_mode()` 호출 (매매 사이클 이전) |
+| `kis_overseas.py` | `sell_all` 로그가 응답 dict 전체를 찍던 것을 `rt_cd`/`msg1`만 찍도록 축소 |
+| `pytest.ini` | 신규. `testpaths=tests`, `pythonpath=.` |
+| `requirements-dev.txt` | 신규. `pytest==9.1.1` (런타임 의존성과 분리) |
+| `tests/test_indicators.py` | 신규. RSI·볼린저·evaluate·evaluate_or_none 특성화 22개 |
+| `tests/test_live_guard.py` | 신규. 실전 가드 8개 |
+| `tests/test_mask.py` | 신규. 마스킹 7개 |
+| `README.md` | 환경변수 표에 `TRADING_MODE`/`CONFIRM_LIVE` 추가, 현재 상태 절 갱신 |
+| `docs/CHANGES.md` | 이 보고 |
+
+코드 로직 변경은 가드·마스킹·로그 축소뿐이다. `trader.py`, `indicators.py`, `state.py`,
+`kis_domestic.py`, `ai_analyzer.py`는 **한 줄도 바꾸지 않았다**.
+
+## 3. 테스트 결과
+
+```
+.venv/bin/python -m pytest
+37 passed in 0.37s
+```
+
+신규 설치: `pytest==9.1.1` (사용자에게 사전 고지함, `.venv`에만 설치). 그 외 패키지 설치 없음.
+
+## 4. 조사 결과 — AGENTS.md와 실제 코드의 불일치
+
+부록 A·B의 조사 결과를 재사용하고, T01에서 추가로 확인한 것만 적는다.
+
+### 4-1. 주문 함수 호출 경로와 재시도
+
+주문 4개 함수(`kis_overseas.buy_shares`, `kis_overseas.sell_all`,
+`kis_domestic.buy_domestic`, `kis_domestic.sell_domestic_all`)는 **`trader.py`에서만** 호출된다
+(`trader.py:282,293,323,333`). 네 함수 모두 내부에서 `_request(...)`를 쓴다.
+
+- `_request`(`kis_overseas.py:92`)는 `max_attempts=3`이고, HTTP 500이면 `_RETRY_SLEEP_SEC`(1.5초)
+  후 재시도한다. **조회와 주문이 같은 래퍼를 공유하므로 주문에도 재시도가 걸린다.**
+- 재시도 조건은 `resp.status_code != 500`일 때 즉시 반환이다. 즉 **500만** 재시도하며,
+  타임아웃(`requests.exceptions.Timeout`)은 `_request` 밖으로 전파돼 재시도되지 않는다
+  (`requests.request(timeout=10)`가 예외를 던지면 `for` 루프를 벗어난다).
+- 따라서 CLAUDE.md 규칙 3("주문 API 자동 재시도 금지") 위반은 **정확히는 "500 응답에 한해 위반"**이다.
+  이 정정은 부록 B-9의 "위반 상태" 서술을 좁히는 것이다.
+- **분류: T04 대상.** 주문 경로에서 `max_attempts=1`로 강제하는 것이 안전하다. T01에서는
+  로직을 바꾸지 않았다(범위 밖).
+
+### 4-2. `evaluate_or_none`의 예외 삼킴 (부록 B-9 재분류)
+
+`indicators.py:114-127`은 `fetch_closes()` 예외를 `logger.warning` 후 `None`으로 삼킨다.
+`try/except: pass`는 아니고 로그를 남기므로 규칙 7의 **문구 위반은 아니지만**, 조회 실패가
+"신호 없음"으로 둔갑해 매매 판단이 계속된다는 점에서 **위험은 실재한다**
+(지표 신호를 못 받으면 `trader._run_cycle`이 하락률 폴백으로 매수할 수 있다).
+
+- **분류: T04/T01 대상.** 신호 없음과 조회 실패를 구분해 실패 시 매수를 보류하는 편이 안전하다.
+  T01에서는 동작을 고정하는 테스트(`test_evaluate_or_none_swallows_exception`)만 추가했다.
+
+### 4-3. 상태 저장 위치
+
+`state.py`의 `bot_state`는 **프로세스 메모리 전용**이다. 파일·DB 저장 없음(부록 A와 일치).
+`trader.py`가 읽는 잔고는 매 사이클 KIS API에서 새로 조회하므로, 메모리 상태가
+브로커 실제 잔고와 어긋나도 **잔고 기준 판단은 브로커 값을 쓴다**. 다만
+`buy_count_today`, `profit_stage`, `last_buy_time`은 재시작 시 소실된다.
+
+- 문서 불일치: **없음** (CLAUDE.md "메모리 전용" 서술과 일치).
+
+### 4-4. 백테스트 코드
+
+저장소에 백테스트/시뮬레이션 스크립트가 **없다**(`find` 결과 0건, `.git` 내 브랜치 이름만 존재).
+따라서 "백테스트가 `trader.py`와 같은 로직을 쓰는가"는 **확인 불가**다.
+`docs/archive/REVIEW_PROMPT.md`의 "3년 8회 신호, 승률 87.5%"는 **재현 불가** 주장이다(부록 B-7).
+
+- 문서 불일치: CLAUDE.md의 "백테스트 스크립트가 저장소에 없음 → 확인 필요"는 **정확**하다.
+
+### 4-5. 일봉 조회의 미확정 봉 포함 여부
+
+- 해외(`kis_overseas.get_daily_closes`): `BYMD=""`(오늘 기준), `GUBN="0"`(일봉), `MODP="1"`.
+  **종료일 파라미터를 오늘로 고정하지 않으므로 장중에 호출하면 당일 미확정 봉이 최신으로 들어올
+  가능성이 있다.** 다만 응답의 `output2` 구조상 당일 봉 포함 여부는 API 문서로 확인하지 못했다.
+  → **VERIFY.** (T01 이전부터 있던 사항, 이번 Task에서 로직을 바꾸지 않았다.)
+- 국내(`kis_domestic.get_daily_closes`): `FID_INPUT_DATE_2`를 `date.today()`로 지정한다.
+  즉 **당일 종가(장중이면 미확정)가 포함될 수 있다.**
+- 영향: RSI·볼린저가 미확정 봉을 쓰면 장중 신호가 확정 종가와 달라진다. T04/T11에서 다룰 문제.
+
+## 5. 확인하지 못한 항목 (VERIFY)
+
+| # | 항목 | 사유 |
+|---|---|---|
+| V1 | 일봉 응답에 당일 미확정 봉이 포함되는지 | KIS 공식 문서로 미확인. 4-5 참고 |
+| V2 | `_request` 재시도 시 실제 주문 중복 여부 | 모의투자에서 500 재시도를 실측하지 않음(main.py 실행 금지) |
+| V3 | 실전 계좌 TR_ID 분기 | 부록 V1과 동일. 실전 검증 불가 |
+| V4 | `mask()`를 로그에 실제 적용할 지점 | T01에서는 유틸만 추가. 현재 코드에 계좌번호를 찍는 로그가 없어(4-6) 적용 대상이 없음 |
+
+### 4-6. 비밀 노출 점검 결과
+
+`grep` 결과, 계좌번호·토큰·키를 로그·print로 출력하는 곳은 **없다**(`print(` 0건,
+`logger.*` 중 `account_no`/`token`/`secret` 포함 0건). `kis_overseas.py:393`의 `sell_all`이
+응답 dict 전체를 찍던 것만 유일한 위험 지점이라 `rt_cd`/`msg1`로 축소했다(응답에 계좌 관련
+필드가 섞여 나올 수 있음). `mask()`는 향후 로그에 계좌번호를 남길 때를 위한 유틸로 추가했고,
+자체 테스트로 고정했다.
+
+## 6. 사용자가 결정해야 할 질문
+
+1. **`TRADING_MODE`와 `IS_MOCK_TRADING`의 관계** — 현재 둘은 **독립**이다. `TRADING_MODE`는
+   종료 여부만 판단하고, 실제 도메인/키 선택은 `IS_MOCK_TRADING`이 한다. 즉
+   `TRADING_MODE=paper`인데 `IS_MOCK_TRADING=False`면 **가드는 통과하지만 실전 도메인으로 실행된다.**
+   T01에서는 기존 동작을 바꾸지 않으려고 분리해 두었다. 둘을 묶을지(예: `TRADING_MODE`에서
+   `IS_MOCK`을 유도) 결정이 필요하다.
+2. **주문 경로 재시도 차단 시점** — T04에서 `_request`를 조회용/주문용으로 분리할지.
+3. **`requirements.txt` 갱신 방식** — `pip freeze`를 쓰면 구 SDK 전이 의존성 18개가 부활한다(부록 A-7).
+   직접 의존성만 손으로 관리할지 결정 필요. T01에서는 `requirements.txt`를 건드리지 않고
+   dev 의존성을 `requirements-dev.txt`로 분리만 했다.
+
+## 7. 다음 Task에 영향을 주는 사항
+
+- `main.py`는 이제 시작 시 `config.enforce_trading_mode()`를 호출한다. 이후 Task에서 `main()`의
+  초기화 순서를 바꿀 때 이 호출이 **매매 사이클보다 앞**에 있어야 한다(`test_main_exits_before_trading_when_live_unconfirmed`가 지킨다).
+- 지표를 바꾸면 `tests/test_indicators.py`의 특성화 값이 깨진다. **의도한 변경일 때만** 값을 갱신하고
+  왜 바뀌어야 하는지 커밋 메시지에 적을 것.
+- `TRADING_MODE` 관련 문서는 `README.md` 환경변수 표가 단일 출처다. 중복 서술 금지.
+- 부록 B-9의 두 항목은 이 보고 4-1·4-2로 **재분류(T04/T01 대상)** 되었다. B-9의 "T01 대상" 표기는
+  이 절을 가리키는 것으로 본다.
