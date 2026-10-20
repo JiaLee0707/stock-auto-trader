@@ -6,12 +6,21 @@
   - 매도: RSI(14) ≥ RSI_OVERBOUGHT 이고 종가가 볼린저 상단 이상
 
 입력 종가 시계열은 반드시 과거 → 최신 순(오래된 것이 앞)이어야 한다.
+
+모든 지표는 **리스트 기반**이며 종가/고가/저가 시계열을 과거 → 최신 순으로 받는다.
+  rsi(period), rsi_series(period), bollinger(period, num_std), sma(period), atr(period)
+
+rsi(2) 처럼 짧은 기간이 필요하면 rsi(closes, 2)를 그대로 쓴다(별도 함수 없음).
+데이터가 부족하면 전 함수가 예외 없이 None을 반환한다(판단 불가를 명시적으로 표현).
 """
 import logging
 
 import config
 
 logger = logging.getLogger("bot")
+
+# 데이터 부족 시 지표는 None(=NaN 아님)을 반환한다. 이 규칙은 전 함수 공통이다.
+INSUFFICIENT_DATA = None
 
 
 def _num(v) -> float:
@@ -53,6 +62,17 @@ def rsi(closes: list[float], period: int = 14) -> float | None:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
+def rsi_series(closes: list[float], period: int = 14) -> list[float | None]:
+    """
+    각 시점의 RSI를 순서대로 반환한다 (앞쪽 period개는 None).
+    라이브러리 비교 검증에서 시점별 값을 맞춰보기 위한 용도.
+    """
+    out: list[float | None] = []
+    for i in range(len(closes)):
+        out.append(rsi(closes[: i + 1], period))
+    return out
+
+
 def bollinger(closes: list[float], period: int = 20, num_std: float = 2.0):
     """
     볼린저밴드 (중심선, 상단, 하단). 종가가 부족하면 None.
@@ -65,6 +85,46 @@ def bollinger(closes: list[float], period: int = 20, num_std: float = 2.0):
     variance = sum((c - mid) ** 2 for c in window) / period
     std = variance ** 0.5
     return mid, mid + num_std * std, mid - num_std * std
+
+
+def sma(closes: list[float], period: int) -> float | None:
+    """
+    단순이동평균 (마지막 period개의 평균). 데이터가 부족하면 None.
+    """
+    if period <= 0 or len(closes) < period:
+        return None
+    window = closes[-period:]
+    return sum(window) / period
+
+
+def atr(highs: list[float], lows: list[float], closes: list[float],
+        period: int = 14) -> float | None:
+    """
+    ATR(평균 진폭, Wilder 평활). 데이터가 부족하면 None.
+
+    TR = max(high-low, |high-prev_close|, |low-prev_close|)
+    최초 period개의 TR 평균을 시드로, 이후 Wilder 평활을 적용한다.
+    입력 세 리스트는 길이가 같아야 하며 과거 → 최신 순이어야 한다.
+    """
+    if len(highs) != len(lows) or len(closes) != len(highs):
+        raise ValueError("highs/lows/closes 길이가 다릅니다")
+    if len(closes) < period + 1:
+        return None
+
+    trs: list[float] = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+
+    # 최초 period개 TR의 단순평균을 시드로 사용 (Wilder 방식)
+    avg = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        avg = (avg * (period - 1) + tr) / period
+    return avg
 
 
 def evaluate(closes: list[float]) -> dict:

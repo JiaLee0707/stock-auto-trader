@@ -1,3 +1,14 @@
 # 개발·테스트 전용 의존성 (런타임 아님). 설치:
-#   .venv/bin/python -m pip install -r requirements-dev.txt
+#   .venv/bin/python -m pip install --pre -r requirements-dev.txt
 pytest==9.1.1
+
+# T02: 자체 구현 지표를 외부 라이브러리 값과 교차검증하기 위한 용도.
+# 런타임 코드는 pandas/pandas-ta 를 import 하지 않는다(tests/test_indicator_verification.py 전용).
+#
+# 주의: pandas-ta 는 pre-release 만 배포되므로 `--pre` 가 필요하다(없으면 설치 실패).
+# 아래 버전은 2026-10-19 이 환경에 실제로 설치돼 있고 테스트가 통과한 조합이다.
+#   pandas-ta 0.4.71b0 은 pandas>=2.3.2, numba==0.61.2 를 요구한다.
+# 이전에 적혀 있던 pandas==2.3.4 는 존재하지 않는 버전이다(2.3.3 다음이 3.0.0).
+pandas==3.0.6
+pandas-ta==0.4.71b0
+

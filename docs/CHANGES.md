@@ -947,3 +947,102 @@ uritemplate==4.2.0                     wheel==0.48.0
   T01 보고 3항의 개수는 T01 시점 값으로 읽어야 한다.
 - `TRADING_MODE` 환경변수는 이제 **일치하지 않으면 종료 사유**다. `.env`에 남아 있다면
   `IS_MOCK_TRADING`과 일치하는지 확인하고, 아니라면 제거할 것.
+
+---
+
+# T02 — 지표 검증 및 일봉 히스토리 캐시 (2026-10-19)
+
+## 1. 완료 여부
+
+**완료.** 단, 두 가지는 "확인 필요"로 남겼다(4항). 지표 검증은 라이브러리 값을 정답으로
+삼지 않고 **정의(고전 Wilder)를 기준으로** 검증하는 방식으로 확정했다.
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 |
+|---|---|
+| `indicators.py` | `sma()`, `atr()`, `rsi_series()`, `INSUFFICIENT_DATA` 추가. 전 함수가 데이터 부족 시 예외 없이 `None` 반환으로 통일. `rsi(2)`는 별도 함수 없이 `rsi(closes, 2)`로 지원 |
+| `history.py` | **신규**. 일봉 CSV 캐시(`data/bars/{symbol}.csv`) + 메타(`{symbol}.meta.json`). 증분 append, date 중복 제거(새 값 우선), 정렬. 원자적 쓰기(temp→replace). `get_confirmed_bars()`가 당일 미확정 봉 제외 |
+| `history.py` (규칙 9) | naive `date.today()`/`datetime.now()` → **KST tz-aware**로 수정. 시스템 로컬 시간이 KST와 다른 환경에서 확정봉 경계가 하루 어긋나는 문제 |
+| `tests/test_indicators.py` | `sma`/`atr`/`rsi(2)` 골든값 테스트 9개 추가(외부 의존성 없음) |
+| `tests/test_history.py` | **신규**. 저장·병합·확정봉 규칙 16개 |
+| `tests/test_indicator_verification.py` | **신규**. 라이브러리 대조 9개(dev 의존성 없으면 skip) |
+| `requirements-dev.txt` | **핀 오류 수정**(아래) |
+
+### 지표 검증 결과 — RSI 시드 차이는 "버그"가 아니라 "정의 차이"
+
+설치된 `pandas-ta`의 RSI 구현을 소스와 수치로 특정했다.
+
+| | 자체 구현 (유지) | pandas-ta 0.4.71b0 |
+|---|---|---|
+| 시드 | 최초 14개 diff의 **SMA 평균** | `ewm(alpha=1/14, adjust=False)`, **첫 diff에서 재귀** |
+| 첫 유효 index | 14 | 1 |
+| 정의 | 고전 Wilder / TA-Lib 호환 | 다른 정의 |
+
+실측 차이(n=600, 톱니 계열): index14 **14.35** → index100 0.024 → index300 9e-9 → index400 5e-12.
+즉 **초기 구간만 다르고 장기적으로 수렴**한다. 따라서 라이브러리 값을 정답으로 놓고 자체 구현을
+맞추면 오히려 틀린다. **자체 구현(SMA 시드)을 유지**하고, 테스트는
+(1) 고전 Wilder 정의를 pandas로 독립 재현해 자체 구현과 전 구간 일치 확인,
+(2) 라이브러리 값이 어떤 정의인지 재현해 특정(무엇을 비교 중인지 명시),
+(3) 두 정의가 장기적으로 수렴함을 수치로 고정 — 세 방향으로 검증한다.
+`test_library_rsi_seeding_scheme_is_identified`는 라이브러리 버전에 따라 분기하므로
+pandas-ta가 0.3.x(SMA 시드)로 바뀌어도 통과한다.
+
+그 외: 볼린저는 ddof=0(모표준편차) vs pandas 기본 ddof=1 — `sqrt(20/19)`≈1.026배 차이로
+무시할 수 없어 테스트에 수치로 남겼고, 기존 특성화 값이 ddof=0을 고정하므로 **정의를 바꾸지 않았다.**
+ATR은 라이브러리와 정확히 일치(둘 다 Wilder 평활).
+
+### `merge_bars` 버그 수정
+
+`merge_bars`가 date를 정규화하지 않아 `"20261020"`과 `"2026-10-20"`이 **서로 다른 날짜로
+취급**됐다. 중복 제거가 깨지고 메타의 `min_date`가 원본 형식으로 남았다. 병합 시점에
+`_norm_date`를 반드시 적용하도록 수정.
+
+## 3. 테스트 결과
+
+```
+126 passed in 1.12s          # 전체
+117 passed, 1 skipped        # pandas/pandas-ta 미설치 환경 재현 시
+```
+
+`tests/test_indicator_verification.py`는 dev 의존성이 없으면 정상 skip됨을
+`ModuleNotFoundError`를 던지는 import blocker로 실제 확인했다. (KST 수정 후 128개)
+
+## 4. 확인하지 못한 항목 (VERIFY)
+
+| # | 항목 | 상태 |
+|---|---|---|
+| V1 | **KIS 일봉 응답의 날짜/시가/고가/저가/거래량 필드명** | 공식 샘플(`koreainvestment/open-trading-api`)이 `output2`를 DataFrame으로 넘길 뿐 키를 열거하지 않아 **확인 불가**. 종가 키(`clos`, `stck_clpr`)만 저장소 코드로 확인됨. 절대 규칙 4에 따라 `kis_rows_to_bars()`는 `NotImplementedError`. **CSV 직접 입력 경로만 사용 가능** |
+| V2 | KIS 일봉 1회 호출 건수 상한 | 해외는 문서화된 상한 없음. 국내는 문서상 1회 최대 100건(종료일 기준) |
+| V3 | `data/bars/*.meta.json`의 `adjusted` 값 신뢰성 | `MODP=1`/`FID_ORG_ADJ_PRC=0`(수정주가 반영)으로 요청하지만, 실제로 수정주가가 반영되는지는 실호출로 미확인 |
+
+**반복 호출 가능 여부는 부분 확인**: 해외 일봉은 공식 샘플이 응답 헤더 `tr_cont`가 `"M"/"F"`일 때
+연속조회로 재귀 호출하므로 **공식 지원됨**을 확인했다. 국내는 샘플에 연속조회 로직이 없고
+1회 100건 제한이므로 기간을 나눠 호출해야 한다. 다만 V1 때문에 실제 수집은 아직 불가하다.
+
+## 5. 사용자가 결정해야 할 질문
+
+1. **`requirements-dev.txt` 핀 오류를 수정했다.** 이전 핀 `pandas==2.3.4`는 **존재하지 않는
+   버전**이었고(2.3.3 다음이 3.0.0), `pandas-ta==0.3.14b0`도 실제 배포본과 달랐다. 실제 설치본
+   조합(`pandas==3.0.6`, `pandas-ta==0.4.71b0`)으로 맞추고 `--pre` 필요성을 주석에 적었다.
+   이 조합으로 확정할지, pandas-ta를 아예 빼고 검증을 자체 재현만으로 할지 결정 필요.
+2. **RSI 시드**: 자체 구현(고전 Wilder, TA-Lib 호환)을 유지하기로 했다. 이 결정이 맞는지 확인 필요.
+   T11 전략 확정 시 진입 필터가 특정 구현에 의존한다면 다시 논의해야 한다.
+3. **KIS 일봉 수집 경로**: V1이 풀리기 전까지 `data/bars/`에 CSV를 직접 넣어야 한다.
+   사용자가 CSV를 준비할지, 아니면 KIS 공식 문서에서 필드명을 확인해 이어서 구현할지 결정 필요.
+4. ~~`get_confirmed_bars()`의 기준일이 naive `date.today()`~~ — **수정함.** 절대 규칙 9에 따라
+   `datetime.now(KST).date()`로 바꾸고, 메타의 `updated_at`도 tz-aware KST로 통일했다.
+   KST 기준 경계 테스트 2개 추가.
+
+## 6. 다음 Task에 영향을 주는 사항
+
+- **`rsi()`는 고전 Wilder 정의다.** 이후 Task에서 RSI 값을 외부 라이브러리·차트와 비교할 때
+  초기 구간 차이는 정의 차이이며 버그가 아니다(400봉 이후 1e-12 수준 수렴).
+- **데이터 부족 시 전 지표가 `None`을 반환**한다. `None`을 0으로 취급하면 매수 신호가 될 수 있다
+  (RSI 0 = 극단 과매도). 진입 필터를 붙일 때 `None`을 명시적으로 처리할 것.
+- **`evaluate_or_none()`은 예외를 삼킨다**(T01 보고 B-9). 조회 실패가 "신호 없음"으로 위장돼
+  눌림목 매수로 이어질 수 있다. T04 대상.
+- `history.py`의 `kis_rows_to_bars()`는 V1이 풀릴 때까지 `NotImplementedError`다.
+  호출부를 만들지 말 것.
+- `data/`는 `.gitignore`에 있다 → 일봉 캐시는 커밋되지 않는다(의도된 동작).
+
