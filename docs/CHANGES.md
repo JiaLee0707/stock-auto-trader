@@ -1046,3 +1046,104 @@ ATR은 라이브러리와 정확히 일치(둘 다 Wilder 평활).
   호출부를 만들지 말 것.
 - `data/`는 `.gitignore`에 있다 → 일봉 캐시는 커밋되지 않는다(의도된 동작).
 
+---
+
+# T03 — 상태 영속화(SQLite)와 브로커 대조 (2026-10-20)
+
+## 1. 완료 여부
+
+**완료.** 재시작 후 읽기, 대조 4가지 시나리오, 자정·타임존 경계, DB 잠김·손상 시 시작 거부를
+모두 테스트로 고정했다. 다만 진행 중 **매도 경로의 실제 안전 갭 1건**을 발견해 함께 막았다(2항).
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 |
+|---|---|
+| `db.py` | **신규**. 표준 `sqlite3` 만 사용. 테이블 6개(`positions`/`orders`/`daily_counters`/`equity_log`/`kv`/`schema_version`) + `_MIGRATIONS` 기반 단순 마이그레이션. 모든 쓰기는 `transaction()`(예외 시 롤백 후 재던짐) |
+| `state.py` | 메모리 dict → **DB 기반**으로 교체. 공개 시그니처 전부 유지(`bought_today_for`/`set_bought_today`/`buy_count_today`/`record_buy`/`profit_stage`/`set_profit_stage`/`last_buy_time`/`bought_today` 프로퍼티). `date.today()` 리셋 로직 제거 — `daily_counters` 의 날짜 키가 자연 해결 |
+| `reconcile.py` | **신규**. `compare_positions()`(순수 함수) + `reconcile()`. 불일치 시 중단 플래그. `RECONCILE_AUTOFIX` 기본 false |
+| `trader.py` | 주문을 `orders` 에, 포지션을 `positions` 에 기록. 사이클 시작 시 중단 플래그 확인. **외부 보유 매도 가드 추가(아래)** |
+| `kis_overseas.py` / `kis_domestic.py` | `get_all_holdings()` 추가 — 기존 잔고 조회와 **같은 엔드포인트·TR_ID·파라미터**, 이미 확인된 필드만 사용 |
+| `main.py` | 시작 시 DB 검증(실패 → `SystemExit(1)`), 매 사이클 시작 시 `reconcile()` |
+| `config.py` | `DB_PATH`, `RECONCILE_AUTOFIX` 추가 |
+
+### 진행 중 발견한 안전 갭 — 외부 보유가 매도될 수 있었다
+
+**요구사항은 "브로커에만 있는 보유는 봇이 매도하지 않음"인데, 실제 매도 경로가 이를 지키지 않았다.**
+`_check_sell()` 은 매도 수량을 **브로커 잔고**에서 받으므로, DB 에 `EXTERNAL` 로 표시돼 있어도
+`RECONCILE_AUTOFIX=true` + `resume_trading()` 이후에는 손절·익절 규칙으로 **팔 수 있었다.**
+`_check_sell()` 앞에 상태 확인을 넣어 막았다.
+
+- `EXTERNAL` 포지션 → 매도하지 않음(로그 경고). 봇의 관리 대상이 아니다.
+- **상태 조회 자체가 실패하면 팔지 않는다**(모르면 주문하지 않는다). 실패를 "포지션 없음"으로
+  처리하면 외부 보유를 팔게 된다.
+- DB 에 포지션 행이 아예 없으면 막지 않는다. 여기서 막으면 기록 누락이 영구 매도 불가가 된다
+  (불일치는 `reconcile()` 이 잡는 몫).
+
+### 트랜잭션 / 실패 동작
+
+- 모든 쓰기가 `transaction()` 을 쓴다. 마이그레이션만 예외적으로 BEGIN/COMMIT 을 직접 관리한다
+  (`executescript` 가 실행 전 암묵적 COMMIT 을 해서 `with conn:` 과 함께 쓰면 원자성이 깨짐 — 코드에 근거 명시).
+- **잠김·손상·경로 문제 → `DatabaseUnavailable` → 시작 거부.** `main()` 이 `SystemExit(1)`.
+  매 사이클에서도 `DatabaseUnavailable` 이면 그 사이클을 건너뛴다.
+- `OSError`(mkdir 실패 등)도 `DatabaseUnavailable` 로 변환한다. 그대로 새면 호출부의
+  `except DatabaseUnavailable` 이 못 잡고 봇이 뜬다.
+
+### 남용 방지: 테스트 격리
+
+`tests/conftest.py` 가 `config.DB_PATH` 를 **모든 테스트에서 임시 경로로** 바꾼다(autouse).
+이 장치가 없으면 `BotState()` 를 인자 없이 만드는 테스트 하나가 실제 상태 DB 를 덮어쓸 수 있다.
+`bot_state` 는 import 시점에 DB 를 열지 않는 지연 프록시(`_LazyBotState`)다.
+
+## 3. 테스트 결과
+
+```
+235 passed in 2.68s
+```
+
+- 진행 중 실패 1건을 고쳤다: `test_last_buy_time_advances_on_new_buy` 가 시각을
+  `2026-10-20T23:30` 으로 하드코딩해, 실제 시각이 그 날짜를 지나자 실패했다. 기준 시각을
+  첫 매수 시각 기준 상대값으로 바꿔 시간 비의존적으로 만들었다.
+- DB 잠김 테스트가 기본 5초 대기를 그대로 써서 스위트가 2.8초 → 10.7초로 느려졌다.
+  `db.BUSY_TIMEOUT_MS` 상수로 빼고 테스트에서 낮춰 0.7초로 되돌렸다.
+
+## 4. 확인하지 못한 항목 (VERIFY)
+
+| # | 항목 | 상태 |
+|---|---|---|
+| V1 | `orders.broker_order_no` | KIS 주문 응답의 주문번호 필드명(ODNO 등)이 저장소 코드·공식 샘플에서 확인되지 않아 **NULL 로 둔다**(절대 규칙 4). `# VERIFY` 주석. T05 대상 |
+| V2 | 체결 반영의 정확성 | 접수(`rt_cd=="0"`)만 보고 포지션에 반영한다. **미체결이면 DB 와 브로커가 어긋나고 다음 사이클에 중단 플래그가 선다.** 이것은 의도된 안전장치지만, 체결 조회가 들어오기 전까지는 사람이 확인해야 한다 |
+| V3 | `get_all_holdings()` 의 필드명 | 기존 잔고 조회 함수가 이미 쓰던 필드(`ovrs_pdno`/`ovrs_cblc_qty`/`pchs_avg_pric`, `pdno`/`hldg_qty`/`pchs_avg_pric`)만 사용. **실제 응답으로 미검증**(모의 서버 호출 없음) |
+| V4 | 해외 잔고의 `get_balance()` vs `get_all_holdings()` 범위 | `get_all_holdings()` 는 `OVRS_EXCG_CD=""`(전체 거래소)로 조회한다. 기존 `get_balance()` 와 동일한 파라미터지만, 다거래소 보유 시 동작은 실호출 미확인 |
+
+## 5. 사용자가 결정해야 할 질문
+
+1. **자동 보정(`RECONCILE_AUTOFIX`) 기본값을 false 로 두었다.** 켜면 봇이 만들지 않은 보유까지
+   DB 에 편입되고, 그 뒤로는 봇이 관리 대상으로 오인할 여지가 생긴다. 소액 실전에서는
+   "중단 + 사람 확인"이 안전하다고 판단했다. 이 기본값이 맞는지 확인 필요.
+2. **불일치가 해소돼도 중단 플래그를 자동 해제하지 않는다.** 일시적 오류로 잘못 풀리는 것을
+   막기 위해서인데, 그러면 사람이 `reconcile.resume_trading()` 을 호출할 때까지 봇이 멈춘다.
+   알림(T09)이 붙기 전까지는 **멈춘 줄 모르고 지나갈 위험**이 있다. 이 위험을 감수할지,
+   아니면 별도로 "중단됨"을 눈에 띄게 남길지(예: 매 사이클 CRITICAL 로그) 결정 필요.
+3. **`profit_stage`(익절 단계)는 재시작 시 0으로 돌아간다**(DB가 아니라 메모리). "당일 도달 단계"
+   성격이라 의도한 동작으로 두었으나, 재시작이 잦으면 같은 단계를 다시 익절할 수 있다.
+   DB 로 옮길지 결정 필요.
+4. **V2 위험**: 체결 확인이 없어 미체결 주문이 다음 사이클에 불일치로 잡힌다. T04/T05 에서
+   체결 조회를 넣기 전까지 모의운용에서 중단이 잦을 수 있다.
+
+## 6. 다음 Task에 영향을 주는 사항
+
+- **`state.py` 공개 시그니처는 그대로다.** 내부만 DB 로 바뀌었고 `bot_state.xxx` 사용처는
+  수정 없이 동작한다. `bot_state` 는 이제 지연 프록시이므로 `isinstance` 검사에 쓰면 안 된다.
+- **모든 매매 경로가 중단 플래그를 먼저 본다.** `run_trading_cycle()` 진입부와 `main.job()` 의
+  `reconcile()`. 새 매매 경로를 추가하면 같은 확인을 넣어야 한다.
+- **포지션을 기록하지 않는 주문은 불일치로 잡힌다.** 주문을 내는 코드를 새로 만들면
+  `orders`/`positions` 기록을 반드시 함께 넣어야 한다(안 넣으면 첫 사이클에 중단된다).
+- **매도 가드**: `_check_sell(..., market=...)` 에 `market` 을 넘기지 않으면 외부 보유 가드가
+  동작하지 않는다(`None` 이면 건너뜀). 새 매도 경로는 `market` 을 반드시 넘길 것.
+- `db.BUSY_TIMEOUT_MS`, `db.SCHEMA_VERSION`, `db._MIGRATIONS` 는 테스트가 monkeypatch 한다.
+  이름을 바꾸면 테스트도 함께 고쳐야 한다.
+- 스키마를 바꿀 때는 `_MIGRATIONS` **끝에 추가**하고 `SCHEMA_VERSION` 을 올린다.
+  기존 항목을 수정하면 이미 적용된 DB 와 어긋난다.
+- `data/bot.db` 는 아직 만들어지지 않았다(테스트는 임시 DB만 씀). 첫 실행 시 `main()` 이 만든다.
+

@@ -160,6 +160,49 @@ def get_domestic_balance(ticker: str | None = None) -> dict:
     }
 
 
+def get_all_holdings() -> list[dict]:
+    """
+    국내주식 **보유 전 종목**을 돌려준다 (T03 대조용).
+
+    `get_domestic_balance()` 는 한 종목만 보지만, 브로커와 DB 를 대조하려면 전체가 필요하다.
+    엔드포인트·TR_ID·파라미터는 `get_domestic_balance()` 와 동일한 것을 쓴다.
+    사용하는 필드도 이미 확인된 것만 쓴다: pdno, hldg_qty, pchs_avg_pric.
+
+    반환: [{"symbol": str, "market": "domestic", "qty": float, "avg_price": float}, ...]
+    """
+    cano, prdt = _account()
+    url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance"
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": prdt,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "00",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+    resp = _request("GET", url, _tr(_TR_BALANCE), params=params)
+    resp.raise_for_status()
+    holdings = resp.json().get("output1") or []
+
+    result = []
+    for h in holdings:
+        qty = _num(h.get("hldg_qty"))
+        if qty <= 0:
+            continue    # 보유 0건 행은 대조 대상이 아니다
+        result.append({
+            "symbol": h.get("pdno"),
+            "market": "domestic",
+            "qty": qty,
+            "avg_price": _num(h.get("pchs_avg_pric")),
+        })
+    return result
+
+
 def get_orderable_cash(ticker: str, price: float) -> float:
     """국내 주문가능금액 조회 (지정가 기준)."""
     cano, prdt = _account()

@@ -19,14 +19,102 @@
      단계는 당일 1회씩만 실행하고, 수익률이 떨어져도 재실행하지 않는다.
 """
 import logging
+import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import config
+import db
 import indicators
 import kis_domestic as kd
 import kis_overseas as kis
-from state import bot_state
+import reconcile
+from state import bot_state, get_bot_state
+
+KST = ZoneInfo("Asia/Seoul")
 
 logger = logging.getLogger("bot")
+
+# 시장 구분 값. `positions`/`orders` 의 market 컬럼에 그대로 저장된다.
+MARKET_OVERSEAS = "overseas"
+MARKET_DOMESTIC = "domestic"
+
+
+def _state_conn():
+    """상태 DB 연결. 실패는 삼키지 않고 올린다(호출부가 사이클을 건너뛴다)."""
+    return get_bot_state().conn
+
+
+def _client_ref(market: str, side: str, ticker: str) -> str:
+    """
+    주문 식별자. `orders.client_ref` 의 UNIQUE 제약으로 중복 기록을 막는다.
+    같은 초에 두 주문이 나가도 충돌하지 않도록 임의 접미사를 붙인다.
+    """
+    stamp = db.now_kst().strftime("%Y%m%d%H%M%S")
+    return f"{market}-{side}-{ticker}-{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _record_order(conn, *, market: str, ticker: str, side: str, qty: float,
+                  price: float | None, order_type: str,
+                  raw_response: dict | None) -> int:
+    """
+    주문 1건을 DB 에 기록한다. 접수(rt_cd=="0")만 확인했으므로 `SUBMITTED` 다.
+
+    `broker_order_no` 는 기록하지 않는다. KIS 주문 응답의 주문번호 필드명(ODNO 등)이
+    저장소 코드와 공식 샘플에서 확인되지 않았다(절대 규칙 4).
+    # VERIFY: T05 에서 공식 문서로 주문번호 필드를 확인해 채울 것.
+    """
+    order_id = db.record_order(
+        conn, symbol=ticker, market=market, side=side, qty=qty, price=price,
+        order_type=order_type, status="SUBMITTED",
+        client_ref=_client_ref(market, side, ticker),
+        broker_order_no=None,
+        raw_response=raw_response,
+    )
+    logger.info(f"[주문기록] #{order_id} {market} {side} {ticker} {qty:g}주 → SUBMITTED")
+    return order_id
+
+
+def _apply_fill_to_position(conn, *, market: str, ticker: str, side: str,
+                            qty: float, price: float | None,
+                            prev_qty: float, prev_avg: float,
+                            entry_signal: dict | None = None) -> None:
+    """
+    주문 수량을 포지션에 반영한다.
+
+    **체결을 확인하지 않는다.** 접수만 보고 반영하므로 미체결이면 DB 와 브로커가
+    어긋나고, 다음 사이클 `reconcile()` 이 중단 플래그를 세운다. 이것은 의도된
+    안전장치다 — 어긋난 사실을 숨기고 매매를 계속하지 않는다.
+    체결 확인·미체결 취소는 T04/T05 범위다.
+    # VERIFY: 미체결 주문이 다음 사이클에 "DB만 있음" 불일치로 잡혀 중단될 수 있다.
+    #         체결 조회가 들어오기 전까지는 사람이 확인해야 한다.
+    """
+    if side == "BUY":
+        new_qty = prev_qty + qty
+        # 평균 단가 = 기존 평가액 + 이번 체결 가정액의 가중평균
+        if new_qty > 0 and price is not None:
+            new_avg = (prev_qty * prev_avg + qty * price) / new_qty
+        else:
+            new_avg = prev_avg
+    else:
+        new_qty = max(0.0, prev_qty - qty)
+        new_avg = prev_avg
+
+    if new_qty <= 0:
+        db.close_position(conn, ticker, market)
+        logger.info(f"[포지션] {market} {ticker} 전량 청산 — CLOSED")
+        return
+
+    existing = db.get_position(conn, ticker, market)
+    db.upsert_position(
+        conn, ticker, market, qty=new_qty, avg_price=new_avg,
+        entry_time=(existing or {}).get("entry_time") or db.now_iso(),
+        entry_signal=(existing or {}).get("entry_signal") or entry_signal,
+        peak_price_since_entry=(existing or {}).get("peak_price_since_entry"),
+        status="OPEN",
+    )
+    logger.info(f"[포지션] {market} {ticker} {new_qty:g}주 @ {new_avg:,.2f} — OPEN")
+
 
 
 def run_trading_cycle(ai_score: int, overseas_open: bool = True, domestic_open: bool = True):
@@ -38,6 +126,22 @@ def run_trading_cycle(ai_score: int, overseas_open: bool = True, domestic_open: 
         overseas_open: 해외(미국) 정규장 개장 여부
         domestic_open: 국내 정규장 개장 여부
     """
+    # 신규 매매 중단 플래그 확인 (T03). 브로커 ↔ DB 불일치가 해소되지 않았으면
+    # 상태를 모르는 채 주문하지 않도록 여기서 멈춘다.
+    # TODO(T09): 중단 시 사용자 알림 연결.
+    try:
+        conn = get_bot_state().conn
+    except Exception as e:
+        logger.error(f"❌ 상태 저장소 접근 실패 — 매매 사이클을 건너뜁니다: {e}")
+        return
+
+    if reconcile.is_trading_halted(conn):
+        logger.error(
+            f"🚨 신규 매매 중단 중 — {reconcile.halt_reason(conn) or '사유 미기록'}. "
+            "불일치를 확인한 뒤 reconcile.resume_trading() 으로 해제하세요."
+        )
+        return
+
     if not config.IS_OVERSEAS_ENABLED:
         pass    # 해외 운용 비활성 (소액 자본 등)
     elif overseas_open:
@@ -54,17 +158,38 @@ def run_trading_cycle(ai_score: int, overseas_open: bool = True, domestic_open: 
 
 
 def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_fn,
-                signal: dict | None = None) -> bool:
+                signal: dict | None = None, market: str | None = None,
+                avg_price: float | None = None) -> bool:
     """
     손절·부분 익절 판단 및 실행. 매도했으면 True.
 
     Args:
         sell_fn: (수량) -> 주문 실행 콜러블
         signal: 지표 신호 (indicators.evaluate 결과). None이면 수익률만으로 판단.
+        market: 포지션 시장 구분(DB 기록용). None이면 DB 기록을 건너뛴다(하위 호환).
+        avg_price: 평균 단가(DB 기록용). None이면 기존 값을 유지한다.
     """
     if qty <= 0:
         logger.info(f"⏩ {prefix} 매도 조건 미충족 (보유 수량 없음)")
         return False
+
+    # ── 0. 외부 보유는 매도하지 않는다 (T03) ──────────────
+    # 매도 수량은 **브로커 잔고**에서 오므로, DB 상태를 보지 않으면 봇이 만들지 않은
+    # 보유까지 손절·익절 규칙으로 팔아버린다. `EXTERNAL` 은 "봇이 만든 기록이 없는 보유"이므로
+    # 봇의 관리 대상이 아니다. 사람이 직접 정리해야 한다.
+    if market:
+        try:
+            pos = db.get_position(_state_conn(), ticker, market)
+        except Exception as e:
+            # 상태를 못 읽었는데 매도하면 위험하다. 모르면 팔지 않는다.
+            logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매도를 건너뜁니다: {e}")
+            return True
+        if pos and pos.get("status") == "EXTERNAL":
+            logger.warning(
+                f"⛔ {prefix} 외부 보유(EXTERNAL) — 봇이 만든 포지션이 아니므로 매도하지 않습니다 "
+                f"({qty:.0f}주 보유). 직접 정리한 뒤 reconcile 로 상태를 맞추세요."
+            )
+            return True
 
     # ── 1. 손절 ──────────────────────────────────────────
     if config.STOP_LOSS_THRESHOLD < 0 and profit_rate <= config.STOP_LOSS_THRESHOLD:
@@ -73,9 +198,17 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
             f"— {qty:.0f}주 전량 매도"
         )
         try:
-            sell_fn(qty)
+            result = sell_fn(qty)
             bot_state.set_bought_today(ticker, False)
             bot_state.set_profit_stage(ticker, 0)
+            if market:
+                conn = _state_conn()
+                _record_order(conn, market=market, ticker=ticker, side="SELL",
+                              qty=qty, price=None, order_type="MARKET",
+                              raw_response=result if isinstance(result, dict) else None)
+                _apply_fill_to_position(conn, market=market, ticker=ticker,
+                                        side="SELL", qty=qty, price=None,
+                                        prev_qty=qty, prev_avg=avg_price or 0.0)
         except Exception as e:
             logger.error(f"{prefix} 손절 주문 실패: {e}")
         return True
@@ -126,7 +259,15 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
             f"— {sell_qty:.0f}주 매도 (보유 {remaining:.0f}주)"
         )
         try:
-            sell_fn(sell_qty)
+            result = sell_fn(sell_qty)
+            if market:
+                conn = _state_conn()
+                _record_order(conn, market=market, ticker=ticker, side="SELL",
+                              qty=sell_qty, price=None, order_type="MARKET",
+                              raw_response=result if isinstance(result, dict) else None)
+                _apply_fill_to_position(conn, market=market, ticker=ticker,
+                                        side="SELL", qty=sell_qty, price=None,
+                                        prev_qty=remaining, prev_avg=avg_price or 0.0)
         except Exception as e:
             logger.error(f"{prefix} 부분 익절 주문 실패: {e}")
             break
@@ -165,7 +306,8 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
 
 def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
                ai_score: int, ratio: float, price_fmt: str, sell_fn, buy_fn,
-               fetch_closes=None):
+               fetch_closes=None, market: str | None = None,
+               buy_order_type: str = "LIMIT"):
     """
     해외·국내 공통 매매 사이클 로직.
 
@@ -173,6 +315,8 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         ratio: 총자산 대비 1회 매수 비중
         price_fmt: 로그용 가격 포맷 함수
         sell_fn / buy_fn: (수량) / (수량, 가격) 주문 실행 콜러블
+        market: 시장 구분(DB 기록용). None이면 DB 기록을 건너뛴다.
+        buy_order_type: 매수 주문 유형(DB 기록용)
     """
     qty         = balance["quantity"]
     avg_price   = balance["avg_price"]
@@ -194,7 +338,8 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             logger.info(f"[{prefix} 지표] {signal['reason']}")
 
     # ── 매도 (손절 > 부분 익절) ──────────────────────────
-    if _check_sell(prefix, ticker, qty, profit_rate, sell_fn, signal):
+    if _check_sell(prefix, ticker, qty, profit_rate, sell_fn, signal,
+                   market=market, avg_price=avg_price):
         return
 
     # ── 매수 ────────────────────────────────────────────
@@ -205,10 +350,9 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
 
     # 직전 매수 후 최소 간격 체크 (2회차 이상부터 적용)
     if buy_count > 0:
-        from datetime import datetime
         last_t = bot_state.last_buy_time(ticker)
         if last_t:
-            elapsed_h = (datetime.now() - last_t).total_seconds() / 3600
+            elapsed_h = (datetime.now(KST) - last_t).total_seconds() / 3600
             if elapsed_h < config.MIN_BUY_INTERVAL_HOURS:
                 logger.info(
                     f"⏩ [{prefix}] 직전 매수 후 {elapsed_h:.1f}h 경과 "
@@ -267,6 +411,21 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
     if buy_fn(buy_krw):
         bot_state.record_buy(ticker)
         logger.info(f"✅ [{prefix}] 매수 완료 — 당일 {bot_state.buy_count_today(ticker)}회차")
+        if market:
+            # 주문 사실과 포지션을 DB 에 남긴다. 남기지 않으면 다음 사이클의
+            # reconcile() 이 브로커 보유를 "외부 보유"로 보고 매매를 멈춘다.
+            last = getattr(buy_fn, "last_order", None) or {}
+            conn = _state_conn()
+            _record_order(conn, market=market, ticker=ticker, side="BUY",
+                          qty=last.get("qty", 0), price=last.get("price", current_price),
+                          order_type=buy_order_type,
+                          raw_response=last.get("result"))
+            _apply_fill_to_position(
+                conn, market=market, ticker=ticker, side="BUY",
+                qty=last.get("qty", 0), price=last.get("price", current_price),
+                prev_qty=qty, prev_avg=avg_price,
+                entry_signal=signal,
+            )
     else:
         logger.warning(f"⚠️ [{prefix}] 매수 미체결 — 횟수 미기록")
 
@@ -279,7 +438,7 @@ def run_overseas_cycle(ai_score: int):
     rate = kis.get_usd_krw_rate()
 
     def sell_fn(qty: float):
-        kis.sell_all(qty, current_price)
+        return kis.sell_all(qty, current_price)
 
     def buy_fn(buy_krw: float) -> bool:
         """원화 예산을 달러로 환산해 정수 수량 매수. 체결되면 True."""
@@ -290,7 +449,9 @@ def run_overseas_cycle(ai_score: int):
                 f"⚠️ [해외] 예산({buy_krw:,.0f}원)이 1주 가격({stock_krw:,.0f}원)보다 작아 매수 불가"
             )
             return False
-        kis.buy_shares(target_qty, current_price)
+        result = kis.buy_shares(target_qty, current_price)
+        # DB 기록에 필요한 실행 수량·가격·원응답을 남긴다(기존 get_orderable 과 같은 방식).
+        buy_fn.last_order = {"qty": target_qty, "price": current_price, "result": result}
         logger.info(f"   → {target_qty}주 × ${current_price:.2f} (약 {target_qty * stock_krw:,.0f}원)")
         return True
 
@@ -310,6 +471,7 @@ def run_overseas_cycle(ai_score: int):
         "해외", ticker, balance_norm, current_price, ai_score,
         config.BUY_RATIO, lambda p: f"${p:,.2f}", sell_fn, buy_fn,
         lambda: kis.get_daily_closes(ticker),
+        market=MARKET_OVERSEAS,
     )
 
 
@@ -320,7 +482,7 @@ def run_domestic_cycle(ai_score: int):
     current_price = kd.get_domestic_price(ticker)
 
     def sell_fn(qty: float):
-        kd.sell_domestic_all(ticker, int(qty), current_price)
+        return kd.sell_domestic_all(ticker, int(qty), current_price)
 
     def buy_fn(buy_krw: float) -> bool:
         """원화 예산으로 정수 수량 매수. 체결되면 True."""
@@ -330,7 +492,9 @@ def run_domestic_cycle(ai_score: int):
                 f"⚠️ [국내] 예산({buy_krw:,.0f}원)이 1주 가격({current_price:,.0f}원)보다 작아 매수 불가"
             )
             return False
-        kd.buy_domestic(ticker, target_qty, current_price)
+        result = kd.buy_domestic(ticker, target_qty, current_price)
+        # DB 기록에 필요한 실행 수량·가격·원응답을 남긴다(기존 get_orderable 과 같은 방식).
+        buy_fn.last_order = {"qty": target_qty, "price": current_price, "result": result}
         logger.info(f"   → {target_qty}주 × {current_price:,.0f}원 (약 {target_qty * current_price:,.0f}원)")
         return True
 
@@ -349,4 +513,5 @@ def run_domestic_cycle(ai_score: int):
         "국내", ticker, balance_norm, current_price, ai_score,
         config.DOMESTIC_BUY_RATIO, lambda p: f"{p:,.0f}원", sell_fn, buy_fn,
         lambda: kd.get_daily_closes(ticker),
+        market=MARKET_DOMESTIC,
     )

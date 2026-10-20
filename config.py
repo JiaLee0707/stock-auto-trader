@@ -213,3 +213,13 @@ STOP_LOSS_THRESHOLD    = float(os.getenv("STOP_LOSS_THRESHOLD", "-5.0"))
 # 모의/실전 토큰 캐시 충돌 방지
 TOKEN_CACHE_FILE = "token_cache_mock.json" if IS_MOCK else "token_cache_real.json"
 LOG_FILE         = "logs/bot.log"
+
+# ── 상태 저장소 (T03) ────────────────────────────────────
+# 표준 sqlite3 파일. `data/` 는 .gitignore 대상이라 커밋되지 않는다.
+DB_PATH = os.getenv("DB_PATH", "data/bot.db")
+
+# 브로커 잔고와 DB 포지션이 어긋날 때 자동 보정 여부.
+# 기본 false(자동 보정 안 함 + 신규 매매 중단). true 일 때만 브로커 값으로 덮어쓴다.
+# VERIFY: 자동 보정을 켜면 봇이 만든 포지션이 아닌 것까지 DB 에 편입된다.
+#         소액 실전에서는 "중단하고 사람이 확인"이 더 안전하다고 보고 기본을 false 로 두었다.
+RECONCILE_AUTOFIX = os.getenv("RECONCILE_AUTOFIX", "false").strip().lower() == "true"

@@ -300,6 +300,45 @@ def get_balance() -> dict:
     }
 
 
+def get_all_holdings() -> list[dict]:
+    """
+    해외주식 **보유 전 종목**을 돌려준다 (T03 대조용).
+
+    `get_balance()` 는 `config.TARGET_TICKER` 한 종목만 보지만, 브로커와 DB 를 대조하려면
+    전체 보유가 필요하다. 엔드포인트·TR_ID·파라미터는 `get_balance()` 와 동일한 것을 쓴다.
+    사용하는 필드도 이미 확인된 것만 쓴다: ovrs_pdno, ovrs_cblc_qty, pchs_avg_pric.
+
+    반환: [{"symbol": str, "market": "overseas", "qty": float, "avg_price": float}, ...]
+    """
+    tr_id = "VTTS3012R" if config.IS_MOCK else "TTTS3012R"
+    url = f"{config.KIS_BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance"
+    account_no, account_suffix = config.KIS_ACCOUNT_NO.split("-")
+    params = {
+        "CANO": account_no,
+        "ACNT_PRDT_CD": account_suffix,
+        "OVRS_EXCG_CD": "",
+        "TR_CRCY_CD": "USD",
+        "CTX_AREA_FK200": "",
+        "CTX_AREA_NK200": "",
+    }
+    resp = _request("GET", url, tr_id, params=params)
+    resp.raise_for_status()
+    holdings = resp.json().get("output1") or []
+
+    result = []
+    for h in holdings:
+        qty = _to_float(h.get("ovrs_cblc_qty"))
+        if qty <= 0:
+            continue    # 보유 0건 행은 대조 대상이 아니다
+        result.append({
+            "symbol": h.get("ovrs_pdno"),
+            "market": "overseas",
+            "qty": qty,
+            "avg_price": _to_float(h.get("pchs_avg_pric")),
+        })
+    return result
+
+
 def get_usd_krw_rate() -> float:
     """USD/KRW 환율 조회 (KIS 해외시세 환율 엔드포인트)."""
     url = f"{config.KIS_BASE_URL}/uapi/overseas-price/v1/quotations/inquire-daily-chartprice"

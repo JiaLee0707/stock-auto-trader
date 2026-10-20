@@ -19,7 +19,10 @@ from zoneinfo import ZoneInfo
 import schedule
 
 import config
+import db
+import reconcile
 from ai_analyzer import analyze_market_sentiment
+from state import get_bot_state
 from trader import run_trading_cycle
 
 # ── 로그 설정 ────────────────────────────────────────────
@@ -66,6 +69,18 @@ def job():
     logger.info(f"🔄 매매 사이클 시작 — {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} KST")
     logger.info(f"   모드: {'📋 모의투자' if config.IS_MOCK else '💰 실전투자'}")
     logger.info("=" * 60)
+
+    # 매 사이클 시작 시 브로커 ↔ DB 대조 (T03).
+    # 대조 실패는 매매를 시작하지 않는 사유다 — 상태를 모르는 채 주문하면 위험하다.
+    try:
+        conn = get_bot_state().conn
+        reconcile.reconcile(conn)
+    except db.DatabaseUnavailable as e:
+        logger.critical(f"🚨 상태 DB 사용 불가 — 매매 사이클을 건너뜁니다: {e}")
+        return
+    except Exception as e:
+        logger.error(f"❌ 브로커 대조 실패 — 매매 사이클을 건너뜁니다: {e}", exc_info=True)
+        return
 
     # 모의·실전 모두 정규장에만 주문한다.
     # 모의투자는 정규장 주문만 체결되고, 실전투자는 시간외 체결 품질이 불량해 제한한다.
@@ -157,6 +172,16 @@ def main():
 
     # 실전 가드: 위반 시 어떤 API 호출보다 먼저 종료 (T01b)
     config.enforce_trading_mode()
+
+    # 상태 DB 검증 (T03). 잠김·손상·경로 문제면 **시작을 거부**한다.
+    # 상태를 모르는 채 스케줄러를 띄우면 이후 사이클마다 조용히 건너뛰기만 하고,
+    # 사용자는 봇이 돌고 있다고 오해한다. 그래서 여기서 즉시 종료한다.
+    try:
+        probe = db.open_db()
+    except db.DatabaseUnavailable as e:
+        logger.critical(f"🚨 상태 DB 사용 불가 — 시작을 거부합니다: {e}")
+        raise SystemExit(1)
+    probe.close()   # 검증용 연결은 바로 닫는다(실제 사용은 get_bot_state() 싱글턴이 한다)
 
     env_mode = "모의투자" if config.IS_MOCK else "실전투자"
     logger.info(f"🚀 나스닥 스노우볼 봇 시작 [{env_mode}] — 대상: {config.TARGET_TICKER}")
