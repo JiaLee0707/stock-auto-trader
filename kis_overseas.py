@@ -186,6 +186,34 @@ def request_order(method: str, url: str, tr_id: str, *, on_uncertain=None, **kwa
     return resp
 
 
+def supports_order_inquiry() -> bool:
+    """
+    이 모듈이 **주문 체결 조회를 실제로 구현했는지** 알려준다 (T04b).
+
+    호출부(`trader._require_settlement_support`)가 "구현됐는지"를 알려고 함수를
+    실제로 불러 보는 방식은 쓰지 않는다. 그러면 조회 요청이 진짜로 나가고,
+    실패 원인(미구현인지 네트워크인지)도 구분되지 않는다.
+    그래서 **플래그로 명시**한다. 구현하면 `get_order_status` 와 함께 True 로 바꾼다.
+    """
+    return False    # 해외주식 체결조회 API 는 docs/kis_api_fields.md 에 없다(T04b)
+
+
+def _ci_get(mapping, key: str) -> str | None:
+    """
+    dict 에서 키를 **대소문자 구분 없이** 찾아 문자열로 돌려준다.
+
+    근거: `docs/kis_api_fields.md` 의 "문서 내 대소문자 불일치" 표 — 같은 의미의 키가
+    표에서는 소문자(`odno`), 예시에서는 대문자(`ODNO`)로 적혀 있다.
+    `trader._order_refs_from_response()` 와 같은 규칙을 쓴다.
+    """
+    if not isinstance(mapping, dict):
+        return None
+    for k, v in mapping.items():
+        if isinstance(k, str) and k.upper() == key.upper():
+            return None if v is None else str(v)
+    return None
+
+
 def _handle_uncertain(on_uncertain, exc) -> None:
     """결과 미확정 시 호출부 콜백을 부른다. 콜백 자체의 실패는 주문 예외를 가리면 안 된다."""
     if on_uncertain is None:

@@ -186,7 +186,7 @@ def test_stale_unfilled_order_is_canceled(conn, fake_refs):
 
     st = trader._settle_order(
         conn, order,
-        status_fn=lambda no: db.OrderStatus("SUBMITTED", filled_qty=0,
+        status_fn=lambda no, **kw: db.OrderStatus("SUBMITTED", filled_qty=0,
                                             avg_fill_price=None, raw={"odno": no}),
         cancel_fn=lambda qty: canceled.append(qty) or {"rt_cd": "0", "msg1": "취소 완료"},
     )
@@ -203,24 +203,50 @@ def test_fresh_unfilled_order_is_not_canceled(conn, fake_refs):
 
     trader._settle_order(
         conn, order,
-        status_fn=lambda no: db.OrderStatus("SUBMITTED"),
+        status_fn=lambda no, **kw: db.OrderStatus("SUBMITTED"),
         cancel_fn=lambda qty: canceled.append(qty) or {"rt_cd": "0"},
     )
     assert canceled == []
     assert db.get_order(conn, order["id"])["status"] == "SUBMITTED"
 
 
-def test_cancel_failure_keeps_order_open(conn, fake_refs):
-    """취소가 실패하면 CANCELED 로 바꾸지 않는다(거짓 확정 금지)."""
+def test_cancel_failure_blocks_symbol_without_fake_cancel(conn, fake_refs):
+    """
+    취소가 실패하면 CANCELED 로 바꾸지 않는다(거짓 확정 금지). 대신 그 주문을
+    UNKNOWN 으로 두어 **이 종목의 신규 매수를 차단**한다 (T04b 요구사항 3).
+    """
     order = _open_order_with_ref(conn, age_minutes=config.ORDER_TIMEOUT_MINUTES + 5)
 
     def boom(qty):
         raise RuntimeError("취소 거부")
 
     trader._settle_order(conn, order,
-                         status_fn=lambda no: db.OrderStatus("SUBMITTED"),
+                         status_fn=lambda no, **kw: db.OrderStatus("SUBMITTED"),
                          cancel_fn=boom)
-    assert db.get_order(conn, order["id"])["status"] == "SUBMITTED"
+    row = db.get_order(conn, order["id"])
+    assert row["status"] == "UNKNOWN", "취소 실패인데 CANCELED 로 확정했다"
+    assert "취소 거부" in (row["raw_response"] or "")
+
+    # 차단 확인: 같은 종목 신규 매수가 막힌다
+    with pytest.raises(trader.DuplicateOrderBlocked):
+        _submit(conn, lambda body, on_uncertain=None: {"rt_cd": "0"})
+    # 매도는 막지 않는다 (손절이 막히면 손실이 커진다)
+    _submit(conn, lambda body, on_uncertain=None: {"rt_cd": "0"}, side="SELL")
+
+
+def test_unfilled_cancel_failure_does_not_halt_whole_bot(conn, fake_refs):
+    """
+    종목 단위로 차단하고 **전역 중단 플래그는 세우지 않는다** (T04b).
+    전역 플래그를 세우면 손절까지 막혀 손실을 방치하게 된다.
+    """
+    import reconcile
+
+    order = _open_order_with_ref(conn, age_minutes=config.ORDER_TIMEOUT_MINUTES + 5)
+    trader._settle_order(conn, order,
+                         status_fn=lambda no, **kw: db.OrderStatus("SUBMITTED"),
+                         cancel_fn=lambda q: (_ for _ in ()).throw(
+                             NotImplementedError("취소 미구현")))
+    assert reconcile.is_trading_halted(conn) is False, "미체결 하나로 전역 매매가 멈췄다"
 
 
 def test_no_partial_cancel_when_nothing_remains(conn, fake_refs):
@@ -229,7 +255,7 @@ def test_no_partial_cancel_when_nothing_remains(conn, fake_refs):
     canceled = []
     trader._settle_order(
         conn, order,
-        status_fn=lambda no: db.OrderStatus("PARTIAL", filled_qty=3.0,
+        status_fn=lambda no, **kw: db.OrderStatus("PARTIAL", filled_qty=3.0,
                                             avg_fill_price=100.0),
         cancel_fn=lambda qty: canceled.append(qty) or {"rt_cd": "0"},
     )
@@ -243,7 +269,7 @@ def test_partial_fill_reflects_only_filled_quantity(conn, fake_refs):
     order = _open_order_with_ref(conn, qty=3)
     trader._settle_order(
         conn, order,
-        status_fn=lambda no: db.OrderStatus("PARTIAL", filled_qty=1.0,
+        status_fn=lambda no, **kw: db.OrderStatus("PARTIAL", filled_qty=1.0,
                                             avg_fill_price=101.0),
     )
     pos = db.get_position(conn, "QQQ", "overseas")
@@ -255,7 +281,7 @@ def test_partial_fill_reflects_only_filled_quantity(conn, fake_refs):
 def test_repeated_inquiry_does_not_double_count_fill(conn, fake_refs):
     """같은 체결을 두 번 더하면 수량이 부풀어 reconcile 이 깨진다."""
     order = _open_order_with_ref(conn, qty=3)
-    st = lambda no: db.OrderStatus("PARTIAL", filled_qty=1.0, avg_fill_price=101.0)
+    st = lambda no, **kw: db.OrderStatus("PARTIAL", filled_qty=1.0, avg_fill_price=101.0)
 
     trader._settle_order(conn, order, status_fn=st)
     trader._settle_order(conn, db.get_order(conn, order["id"]), status_fn=st)
@@ -267,9 +293,9 @@ def test_extra_fill_is_added_incrementally(conn, fake_refs):
     """추가 체결분은 증분만 반영된다."""
     order = _open_order_with_ref(conn, qty=3)
     trader._settle_order(conn, order,
-                         status_fn=lambda no: db.OrderStatus("PARTIAL", 1.0, 100.0))
+                         status_fn=lambda no, **kw: db.OrderStatus("PARTIAL", 1.0, 100.0))
     trader._settle_order(conn, db.get_order(conn, order["id"]),
-                         status_fn=lambda no: db.OrderStatus("FILLED", 3.0, 110.0))
+                         status_fn=lambda no, **kw: db.OrderStatus("FILLED", 3.0, 110.0))
 
     pos = db.get_position(conn, "QQQ", "overseas")
     assert pos["qty"] == 3.0
@@ -311,7 +337,7 @@ def test_inquiry_failure_leaves_order_untouched(conn, fake_refs):
     """체결 조회가 실패하면 추측하지 않는다 — 상태를 그대로 두고 로그만 남긴다."""
     order = _open_order_with_ref(conn, qty=3)
 
-    def boom(no):
+    def boom(no, **kw):
         raise RuntimeError("조회 실패")
 
     assert trader._settle_order(conn, order, status_fn=boom) is None
@@ -323,7 +349,7 @@ def test_not_implemented_inquiry_is_reported_not_crashed(conn, fake_refs):
     """미구현(주문번호 필드 미확인) 조회는 예외를 올리지 않고 로그로 알린다."""
     order = _open_order_with_ref(conn, qty=3)
 
-    def not_impl(no):
+    def not_impl(no, **kw):
         raise NotImplementedError("TR_ID 미확인")
 
     assert trader._settle_order(conn, order, status_fn=not_impl) is None
@@ -339,7 +365,7 @@ def test_stale_order_without_order_no_cannot_be_canceled(conn):
     canceled = []
     # 주문번호를 못 꺼내므로(status_fn 호출 전에 None 반환) 취소도 시도되지 않는다
     assert trader._settle_order(conn, order,
-                                status_fn=lambda no: db.OrderStatus("SUBMITTED"),
+                                status_fn=lambda no, **kw: db.OrderStatus("SUBMITTED"),
                                 cancel_fn=lambda q: canceled.append(q)) is None
     assert canceled == []
 
@@ -437,7 +463,7 @@ def test_sell_position_is_reduced_after_fill(conn, fake_refs, monkeypatch):
     )
     order = db.list_orders(conn)[0]
     trader._settle_order(conn, order,
-                         status_fn=lambda no: db.OrderStatus("FILLED", 3.0, 110.0))
+                         status_fn=lambda no, **kw: db.OrderStatus("FILLED", 3.0, 110.0))
 
     assert db.get_position(conn, "QQQ", "overseas")["status"] == "CLOSED"
 

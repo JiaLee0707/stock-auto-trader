@@ -123,29 +123,59 @@ def _mask_payload(payload):
     return out
 
 
+# KIS 응답 키를 대소문자 구분 없이 읽는 헬퍼. 정의는 `kis_overseas` 에 있다
+# (kis_domestic 도 같은 것을 쓴다). 근거는 그쪽 docstring 참고.
+_ci_get = kis._ci_get
+
+
 def _order_refs_from_response(result: dict | None) -> dict | None:
     """
     주문 응답에서 **체결 조회·취소에 필요한 주문 식별자**를 꺼낸다.
 
     반환: {"order_no": str, "org_no": str|None, "order_time": str|None} 또는 None.
 
-    **미구현(확인 필요) — 절대 규칙 4.** KIS 주문 응답의 주문번호 필드명이
-    공식 문서·공식 샘플에서 확인되지 않았다. 추측한 키를 읽으면 "주문번호 없음"과
-    "필드명이 틀림"을 구분할 수 없게 되므로 지금은 채우지 않는다
-    (`orders.broker_order_no` 는 NULL 로 남는다).
+    근거: `docs/kis_api_fields.md` §1 주식주문(현금) Response Body.
 
-    # VERIFY: 공식 문서로 주문번호 필드를 확인한 뒤 이 함수만 채우면
-    #         체결 조회·미체결 취소가 동작한다(나머지 배선은 이미 준비돼 있다).
-    #         그 전까지 주문은 SUBMITTED 로 남고, reconcile 이 "미확정 주문"으로
-    #         유예하다가 ORDER_TIMEOUT_MINUTES 초과 시 매매를 중단시킨다.
+        output.KRX_FWDG_ORD_ORGNO  계좌관리점코드 (string(5))
+        output.ODNO                주문번호       (string(10))
+        output.ORD_TMD             주문시간       (string(6))
+
+    응답 예시(문서 원문):
+        {"rt_cd": "0", "output": {"KRX_FWDG_ORD_ORGNO": "06010",
+                                  "ODNO": "0001569157", "ORD_TMD": "155211"}}
+
+    **주문번호(ODNO)가 없으면 None 을 돌려준다.** 주문번호 없이는 체결 조회도
+    취소도 할 수 없으므로, 이후 단계가 "주문번호 없음"을 명확히 알 수 있어야 한다.
+    `KRX_FWDG_ORD_ORGNO` 는 취소(order-rvsecncl)의 필수 파라미터라 함께 돌려준다.
     """
-    if not result:
+    if not result or str(result.get("rt_cd")) != "0":
         return None
-    return None
+    output = result.get("output")
+    order_no = _ci_get(output, "ODNO")
+    if not order_no:
+        return None
+    return {
+        "order_no": order_no,
+        "org_no": _ci_get(output, "KRX_FWDG_ORD_ORGNO"),
+        "order_time": _ci_get(output, "ORD_TMD"),
+    }
 
 
 def _stored_order_refs(order: dict) -> dict | None:
-    """DB 에 저장된 주문 raw_response 에서 주문 식별자를 다시 꺼낸다."""
+    """
+    DB 에 저장된 주문에서 주문 식별자를 꺼낸다.
+
+    먼저 `orders.broker_order_no`(T04b 부터 저장됨)를 본다. 없으면 raw_response 를
+    다시 해석한다(스키마 v2 이전에 기록된 주문 호환).
+    """
+    order_no = order.get("broker_order_no")
+    if order_no:
+        return {
+            "order_no": str(order_no),
+            "org_no": order.get("broker_org_no"),
+            "order_time": None,
+        }
+
     raw = order.get("raw_response")
     if not raw:
         return None
@@ -154,8 +184,6 @@ def _stored_order_refs(order: dict) -> dict | None:
     except (TypeError, ValueError) as e:
         logger.error(f"[주문] raw_response 해석 실패 (#{order.get('id')}): {e}")
         return None
-    if str(payload.get("rt_cd")) != "0":
-        return None    # 거부된 주문은 조회할 주문번호가 없다
     return _order_refs_from_response(payload)
 
 
@@ -288,16 +316,36 @@ def _submit_order(conn, *, market: str, ticker: str, side: str, qty: float,
 
     refs = _order_refs_from_response(result)
     if refs:
+        # 취소에 필요한 KRX_FWDG_ORD_ORGNO 도 함께 저장한다 (T04b).
         db.update_order_status(conn, order_id, status="SUBMITTED",
-                               broker_order_no=refs["order_no"], raw_response=result)
+                               broker_order_no=refs["order_no"],
+                               broker_org_no=refs["org_no"], raw_response=result)
     else:
         db.update_order_status(conn, order_id, status="SUBMITTED", raw_response=result)
-        # TODO(T05): 주문번호 필드가 확인되면 이 경로는 사라진다.
-        logger.warning(
-            f"⚠️ 주문 #{order_id} 주문번호를 얻지 못했습니다(필드명 미확인) — "
-            f"체결 조회·미체결 취소가 불가합니다. {market} {ticker} {side} {qty:g}주"
+        logger.error(
+            f"⛔ 주문 #{order_id} 응답에서 주문번호(ODNO)를 얻지 못했습니다 — "
+            f"체결 조회·미체결 취소가 불가합니다. 이 주문은 조회로 확정되지 않으므로 "
+            f"직접 확인해야 합니다: {market} {ticker} {side} {qty:g}주"
         )
     return order_id
+
+
+def _call_status_fn(status_fn, order: dict, refs: dict):
+    """
+    체결 조회 함수를 부른다. `org_no`·`ticker` 를 함께 넘긴다 (T04b).
+
+    국내 `get_order_status()` 는 `ODNO` 로 좁혀 조회하므로 주문번호만으로 충분하지만,
+    `ticker` 를 주면 서버가 더 좁혀 준다. 미구현 시장은 애초에 주문이 나가지 않으므로
+    (`_require_settlement_support`) 여기서 인자 호환을 걱정할 필요가 없다.
+    """
+    order_no = refs["order_no"]
+    extras = {"ticker": order.get("symbol")}
+    if refs.get("org_no"):
+        extras["org_no"] = refs["org_no"]
+    # `TypeError` 를 잡아 재시도하지 않는다. 그러면 조회 함수 **내부**의 TypeError
+    # (예: 응답 파싱 버그)까지 "인자 문제"로 오인해 같은 실패를 두 번 부른다.
+    # 인자 구성은 호출부(`status_fn` 래퍼)가 맞춰서 넘긴다.
+    return status_fn(order_no, **extras)
 
 
 def _settle_order(conn, order: dict, status_fn, cancel_fn=None) -> "db.OrderStatus | None":
@@ -321,7 +369,7 @@ def _settle_order(conn, order: dict, status_fn, cancel_fn=None) -> "db.OrderStat
 
     symbol, market, side = order["symbol"], order["market"], order["side"]
     try:
-        st = status_fn(refs["order_no"])
+        st = _call_status_fn(status_fn, order, refs)
     except NotImplementedError as e:
         logger.error(f"[체결조회] {market} {symbol} 미구현 — 주문 #{order['id']} 상태 미확정: {e}")
         return None
@@ -357,25 +405,29 @@ def _settle_order(conn, order: dict, status_fn, cancel_fn=None) -> "db.OrderStat
 
 
 def _cancel_stale_order(conn, order: dict, st, cancel_fn) -> None:
-    """`ORDER_TIMEOUT_MINUTES` 를 넘긴 미체결 주문을 취소한다 (T04)."""
-    if cancel_fn is None:
-        logger.error(
-            f"⛔ 주문 #{order['id']} 이 {config.ORDER_TIMEOUT_MINUTES:g}분 넘게 미체결인데 "
-            f"취소 기능이 없습니다. 직접 취소하세요: {order['market']} {order['symbol']} "
-            f"{order['side']} {order.get('qty'):g}주"
-        )
-        return
+    """
+    `ORDER_TIMEOUT_MINUTES` 를 넘긴 미체결 주문을 취소한다 (T04/T04b).
 
+    **취소하지 못하면 그 종목의 신규 매수를 차단한다.** 미체결 주문이 살아 있는데
+    계속 신규 주문을 내면 같은 종목에 주문이 겹겹이 쌓이고, 취소도 안 되니 사람이
+    손으로 정리할 때까지 상태를 알 수 없게 된다. 그래서 취소 실패(미구현·거부) 시
+    `_halt_due_to_unfilled()` 로 차단하고 CRITICAL 로 남긴다.
+    """
     remaining = float(order.get("qty") or 0.0) - float(st.filled_qty or 0.0)
     if remaining <= 0:
+        return   # 이미 전량 체결 — 취소할 것이 없다
+
+    if cancel_fn is None:
+        _halt_due_to_unfilled(conn, order, remaining, "취소 기능이 연결되지 않았습니다")
         return
+
     try:
         result = cancel_fn(remaining)
     except NotImplementedError as e:
-        logger.error(f"[취소] {order['market']} {order['symbol']} 미구현 — 주문 #{order['id']}: {e}")
+        _halt_due_to_unfilled(conn, order, remaining, f"취소 미구현: {e}")
         return
     except Exception as e:
-        logger.error(f"[취소] 실패 — 주문 #{order['id']} 을 그대로 둡니다: {e}")
+        _halt_due_to_unfilled(conn, order, remaining, f"취소 실패: {e}")
         return
 
     db.update_order_status(conn, order["id"], status="CANCELED",
@@ -383,6 +435,56 @@ def _cancel_stale_order(conn, order: dict, st, cancel_fn) -> None:
     logger.warning(
         f"🚫 주문 #{order['id']} 미체결 취소 — {order['market']} {order['symbol']} "
         f"{remaining:g}주 (체결 {st.filled_qty:g}주는 유지)"
+    )
+
+
+def _halt_due_to_unfilled(conn, order: dict, remaining: float, why: str) -> None:
+    """
+    미체결 주문을 취소하지 못했을 때 **그 종목의 신규 주문을 차단**한다 (T04b).
+
+    취소되지 않은 주문이 살아 있는 채로 계속 주문하면 같은 종목에 주문이 쌓인다.
+
+    **전역 중단(`reconcile.halt_trading`)을 쓰지 않는다.** 전역 플래그는 손절까지
+    막아서, 미체결 하나 때문에 손실을 방치하게 된다. 차단은 **그 종목의 매수에만**
+    건다(`_require_no_unfilled`). 매도(손절·익절)는 계속 나가야 한다.
+    """
+    reason = (
+        f"{order['market']} {order['symbol']} 미체결 주문 #{order['id']} "
+        f"({remaining:g}주) 취소 불가 — {why}"
+    )
+    logger.critical(
+        f"🚨 {reason}\n"
+        f"   이 주문이 살아 있는 채로 신규 주문을 내면 주문이 중복될 수 있어 "
+        f"{order['market']} {order['symbol']} 의 신규 매수를 차단합니다(손절 매도는 계속 동작).\n"
+        f"   KIS 앱에서 직접 취소한 뒤 확인하세요."
+    )
+    # 주문 행의 상태를 UNKNOWN 으로 두고 사유를 남긴다. UNKNOWN 은 `list_open_orders()`
+    # 대상이라 그대로 남아 있는 한 이 종목의 신규 매수가 계속 차단된다
+    # (전역 플래그와 달리 해제 명령이 필요 없고, 주문이 확정되면 자동으로 풀린다).
+    try:
+        db.update_order_status(conn, order["id"], status="UNKNOWN",
+                               filled_qty=float(order.get("filled_qty") or 0.0),
+                               raw_response={"halt_reason": reason})
+    except Exception as e:
+        # 상태 기록조차 못 하면 그 사실을 반드시 알린다(삼키지 않는다).
+        logger.critical(f"🚨🚨 미체결 주문 상태 기록에 실패했습니다 — 즉시 확인하세요: {e}")
+
+
+def get_cancelable_order(order_no: str, *, ticker: str) -> "db.OrderStatus":
+    """
+    주식정정취소가능주문조회 (T04b).
+
+    **미구현(확인 필요) — 절대 규칙 4.** 이 API 는 `docs/kis_api_fields.md`
+    "이 파일에 없는 것 (추측 금지)" 목록에 **명시적으로 빠져 있다.** 엔드포인트·
+    TR_ID·응답 필드를 추측하면 취소 가능 수량(`psbl_qty`)을 잘못 읽어 잘못된 수량으로
+    취소가 나갈 수 있다. 문서 §3 개요도 "호출 전에 이 API 로 정정취소가능수량을
+    확인하라"고 권고하지만, 그 API 문서가 없으므로 구현하지 않는다.
+
+    TODO: 공식 문서 확인 후 구현. 확인되면 `cancel_order()` 앞단에 연결한다.
+    """
+    raise NotImplementedError(
+        "주식정정취소가능주문조회 API 는 docs/kis_api_fields.md 에 없어 구현하지 "
+        "않았습니다. 엔드포인트/TR_ID/psbl_qty 필드를 추측하지 않습니다."
     )
 
 
@@ -746,6 +848,45 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         logger.warning(f"⚠️ [{prefix}] 매수 미체결 — 횟수 미기록")
 
 
+def _require_settlement_support(module, label: str) -> None:
+    """
+    체결 조회가 구현되지 않은 시장에서는 **주문을 내지 않는다** (T04b).
+
+    해외(`kis_overseas.get_order_status`)는 공식 문서가 없어 여전히 미구현이다.
+    체결 조회가 없으면 주문이 나가도 포지션에 반영되지 않고(체결 확인 불가),
+    미체결 주문이 계속 미확정으로 남아 아무도 정리하지 못한다(주문이 반복될 수 있다).
+    그래서 조용히 삼키지 말고 여기서 **명시적으로 막고 CRITICAL 로 남긴다.**
+
+    구현 여부는 `supports_order_inquiry()` 플래그로 본다. 조회 함수를 실제로 불러
+    보는 방식은 쓰지 않는다 — 그러면 조회 요청이 진짜로 나가고, 실패 원인
+    (미구현인지 네트워크 오류인지)이 구분되지 않는다.
+    """
+    probe = getattr(module, "supports_order_inquiry", None)
+    if probe is None:
+        # 플래그가 없는 모듈은 "구현 여부를 알 수 없다" → 모르면 주문하지 않는다.
+        logger.critical(
+            f"🚨 [{label}] 체결 조회 구현 여부를 확인할 수 없어 주문을 내지 않습니다 "
+            f"({module.__name__} 에 supports_order_inquiry() 가 없습니다)."
+        )
+        raise NotImplementedError(
+            f"{module.__name__} 에 supports_order_inquiry() 가 없어 "
+            f"체결 조회 지원 여부를 알 수 없습니다"
+        )
+
+    if probe():
+        return
+
+    logger.critical(
+        f"🚨 [{label}] 체결 조회가 구현되지 않아 주문을 내지 않습니다. "
+        f"체결을 확인할 수 없으면 포지션에 반영할 수 없고, 미체결 주문도 정리할 수 없습니다.\n"
+        f"   해외주식 체결조회/취소 API 는 공식 문서가 확인되지 않았습니다(T04b 보고 참고).\n"
+        f"   운용을 멈추려면 IS_OVERSEAS_ENABLED=false 로 두세요."
+    )
+    raise NotImplementedError(
+        f"[{label}] 체결 조회가 미구현이라 주문을 내지 않습니다"
+    )
+
+
 def run_overseas_cycle(ai_score: int):
     """해외주식(QQQ) 매매 사이클 (T04: 지정가·체결 확인 기반)."""
     ticker = config.TARGET_TICKER
@@ -753,6 +894,9 @@ def run_overseas_cycle(ai_score: int):
     current_price = kis.get_current_price(ticker)
     rate = kis.get_usd_krw_rate()
     conn = _state_conn()
+
+    # 체결 조회가 없으면 주문을 내지 않는다 (T04b).
+    _require_settlement_support(kis, "해외")
 
     def _qty_for_budget(buy_krw: float) -> int:
         """원화 예산을 달러로 환산한 정수 수량. 0이면 살 수 없다."""
@@ -786,6 +930,9 @@ def run_overseas_cycle(ai_score: int):
                                                            on_uncertain=on_uncertain),
         )
 
+    def status_fn(order_no: str, *, ticker=None, org_no=None):
+        return kis.get_order_status(order_no, symbol=ticker)
+
     def cancel_fn(qty: float) -> dict:
         return kis.cancel_order("", quantity=qty, symbol=ticker)
 
@@ -803,7 +950,7 @@ def run_overseas_cycle(ai_score: int):
         config.BUY_RATIO, lambda p: f"${p:,.2f}", None, buy_fn,
         lambda: kis.get_daily_closes(ticker),
         market=MARKET_OVERSEAS, submit_buy=submit_buy, submit_sell=submit_sell,
-        status_fn=kis.get_order_status, cancel_fn=cancel_fn,
+        status_fn=status_fn, cancel_fn=cancel_fn,
     )
 
 
@@ -843,6 +990,9 @@ def run_domestic_cycle(ai_score: int):
                                                        on_uncertain=on_uncertain),
         )
 
+    def status_fn(order_no: str, *, ticker=None, org_no=None):
+        return kd.get_order_status(order_no, ticker=ticker, org_no=org_no)
+
     def cancel_fn(qty: float) -> dict:
         return kd.cancel_order("", quantity=int(qty), ticker=ticker)
 
@@ -861,5 +1011,5 @@ def run_domestic_cycle(ai_score: int):
         config.DOMESTIC_BUY_RATIO, lambda p: f"{p:,.0f}원", None, buy_fn,
         lambda: kd.get_daily_closes(ticker),
         market=MARKET_DOMESTIC, submit_buy=submit_buy, submit_sell=submit_sell,
-        status_fn=kd.get_order_status, cancel_fn=cancel_fn,
+        status_fn=status_fn, cancel_fn=cancel_fn,
     )

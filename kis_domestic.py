@@ -15,29 +15,40 @@ import logging
 
 import config
 import db
-from kis_overseas import _request, request_order
+from kis_overseas import _ci_get, _request, request_order
 
 logger = logging.getLogger("bot")
 
-# 국내 주문 TR_ID (모의/실전)
-_TR_BUY  = ("VTTC0802U", "TTTC0802U")   # 현금 매수 주문
-_TR_SELL = ("VTTC0801U", "TTTC0801U")   # 현금 매도 주문
+# 국내 주문 TR_ID (모의, 실전). T04b 에서 **신 TR_ID 로 교체**했다.
+# 근거: docs/kis_api_fields.md §1 주식주문(현금)
+#   실전 매수 TTTC0012U / 매도 TTTC0011U, 모의 매수 VTTC0012U / 매도 VTTC0011U
+#   구 TR_ID(TTTC0802U/TTTC0801U 등)에 대해 문서가
+#   "사전 고지 없이 막힐 수 있음, 반드시 신TR로 변경"이라 명시하고 있다.
+_TR_BUY  = ("VTTC0012U", "TTTC0012U")   # 현금 매수 주문 (신 TR_ID)
+_TR_SELL = ("VTTC0011U", "TTTC0011U")   # 현금 매도 주문 (신 TR_ID)
+# 체결 조회 (3개월 이내). 근거: docs/kis_api_fields.md §2 주식일별주문체결조회
+_TR_CCLD = ("VTTC0081R", "TTTC0081R")
+# 정정취소. 근거: docs/kis_api_fields.md §3 주식주문(정정취소)
+_TR_RVSECNCL = ("VTTC0013U", "TTTC0013U")
 _TR_BALANCE = ("VTTC8434R", "TTTC8434R")  # 잔고 조회
 _TR_PSBL_ORDER = ("VTTC8908R", "TTTC8908R")  # 매수가능조회
 
-# 주문 구분 코드 (ORD_DVSN). 저장소가 이미 쓰던 값만 사용한다.
-#   01 = 지정가 (기존 buy_domestic/sell_domestic_all 이 쓰던 값)
-#   00 = 시장가 (기존 코드에서 확인되지 않음 → 확인 필요)
-# VERIFY: 국내 시장가(00)는 공식 문서로 확인하지 않았다. ORDER_TYPE=market 을 쓰려면
-#         공식 문서 확인이 먼저다. 확인 전에는 지정가만 동작한다.
-_DVSN_LIMIT = "01"
-_DVSN_MARKET = "00"
+# 주문 구분 코드 (ORD_DVSN). **T04b 에서 바로잡았다.**
+# 근거: docs/kis_api_fields.md §1 Request Body ORD_DVSN 행 —
+#       "[KRX] 00 지정가, 01 시장가, 02 조건부지정가, ..."
+# T04 까지 코드는 지정가에 "01" 을 보내고 있었다. 문서 기준으로는 "01" 이 **시장가**라
+# 지정가 주문이 시장가로 나갈 수 있었다(게다가 시장가는 ORD_UNPR="0" 이어야 하는데
+# 실제 단가를 함께 보내는 모순된 요청이었다).
+_DVSN_LIMIT = "00"    # 지정가 (주문단가를 문자열로 지정)
+_DVSN_MARKET = "01"   # 시장가 (ORD_UNPR = "0")
 
 # 국내 주식/ETF 호가 단위(틱) 구간표.
-# VERIFY: 아래 구간은 **공식 자료로 확인하지 못했다.** 저장소 코드에도 틱 계산이 없었다.
+# VERIFY: 이 표가 **일반 주식 호가표인지 ETF 호가표인지** docs/kis_api_fields.md 에 없다.
+#         ("이 파일에 없는 것" 목록에 "ETF 호가 단위표"가 명시돼 있다.)
 #         값이 틀리면 지정가가 호가 단위에 맞지 않아 주문이 거부될 수 있다.
+#         근거가 확인될 때까지 config.ORDER_PRICE_TICKS 기본값은 0(현재가 그대로)이다 —
+#         틱을 옮기지 않으면 이 표가 틀려도 주문에 영향이 없다.
 #         주문이 거부되면 로그의 msg1 을 보고 이 표를 고쳐야 한다.
-#         확인 전까지는 _order_price() 가 "현재가 그대로"를 쓰도록 TICKS=0 을 권장한다.
 _TICK_TABLE = (
     (2_000, 1),
     (5_000, 5),
@@ -63,22 +74,32 @@ def tick_size(price: float) -> int:
 
 
 def _order_dvsn() -> str:
-    """설정된 주문 유형에 맞는 ORD_DVSN 코드. market 은 확인 전이라 예외로 막는다."""
+    """
+    설정된 주문 유형에 맞는 ORD_DVSN 코드.
+
+    근거: docs/kis_api_fields.md §1 Request Body — 00 지정가 / 01 시장가.
+    `ORDER_TYPE` 이 limit/market 이외 값이면 조용히 넘어가지 않고 예외로 막는다
+    (모르는 값을 지정가로 해석하면 의도와 다른 주문이 나갈 수 있다).
+    """
     if config.ORDER_TYPE == "market":
-        raise NotImplementedError(
-            "ORDER_TYPE=market(국내 시장가, ORD_DVSN=00)은 공식 문서로 확인되지 않았습니다. "
-            "확인 전에는 지정가(ORDER_TYPE=limit)만 사용하세요."
-        )
-    return _DVSN_LIMIT
+        return _DVSN_MARKET
+    if config.ORDER_TYPE == "limit":
+        return _DVSN_LIMIT
+    raise ValueError(
+        f"ORDER_TYPE 은 limit 또는 market 이어야 합니다: {config.ORDER_TYPE!r}"
+    )
 
 
 def _order_price(price: float, *, side: str) -> str:
     """
-    지정가 주문가. 매수는 현재가 + N틱, 매도는 현재가 - N틱.
+    주문단가(ORD_UNPR) 문자열. **지정가일 때만** 단가를 계산한다.
 
+    시장가는 문서가 `ORD_UNPR = "0"` 이라고 명시하므로(§1 ORD_UNPR 행) 단가를 넣지 않는다.
+    지정가는 매수 현재가 + N틱, 매도 현재가 − N틱.
     `ORDER_PRICE_TICKS=0` 이면 현재가 그대로다(틱 표가 검증되지 않았을 때 안전한 선택).
-    가격은 호가 단위에 맞춰 반올림한다 — 호가 단위에 맞지 않으면 주문이 거부된다.
     """
+    if _order_dvsn() == _DVSN_MARKET:
+        return "0"      # 시장가: 문서 기준 ORD_UNPR = "0"
     ticks = max(0, int(config.ORDER_PRICE_TICKS))
     unit = tick_size(price)
     if ticks == 0:
@@ -90,6 +111,29 @@ def _order_price(price: float, *, side: str) -> str:
     # 호가 단위에 맞춤
     snapped = int(round(raw / unit) * unit) if unit > 0 else raw
     return str(max(unit, snapped))
+
+
+def supports_order_inquiry() -> bool:
+    """
+    이 모듈이 **주문 체결 조회를 실제로 구현했는지** 알려준다 (T04b).
+
+    근거: `docs/kis_api_fields.md` §2 주식일별주문체결조회 — 구현 완료.
+    호출부가 "구현됐는지"를 알려고 함수를 실제로 불러 보게 하지 않기 위한 플래그다
+    (그러면 조회 요청이 진짜로 나가고 실패 원인도 구분되지 않는다).
+    """
+    return True
+
+
+def _tr(pair: tuple) -> str:
+    """
+    (모의 TR_ID, 실전 TR_ID) 에서 현재 모드의 값을 고른다.
+
+    # VERIFY: 이 함수는 T04b 이전까지 **정의되지 않은 채** 여러 곳에서 호출되고 있었다
+    #         (조회 3곳 + 주문 1곳). 즉 해당 경로는 실행되면 NameError 로 죽었다.
+    #         모드 판정은 절대 규칙 1에 따라 `config.IS_MOCK` 만 쓴다
+    #         (`TRADING_MODE` 는 표시용이라 쓰지 않는다).
+    """
+    return pair[0] if config.IS_MOCK else pair[1]
 
 
 def _account() -> tuple:
@@ -358,31 +402,143 @@ def sell_domestic_all(ticker: str, quantity: int, price: float, *, on_uncertain=
     return send_order(body, side="SELL", on_uncertain=on_uncertain)
 
 
-def get_order_status(order_no: str, *, ticker: str | None = None,
-                     order_date: str | None = None) -> "db.OrderStatus":
-    """
-    국내주식 주문 1건의 체결 상태를 조회한다 (T04).
+def _find_order_row(rows: list[dict], order_no: str) -> dict | None:
+    """output1 행들에서 주문번호가 일치하는 행을 찾는다(대소문자 무시)."""
+    target = str(order_no).lstrip("0") or "0"
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        got = _ci_get(row, "odno")
+        if got and (got.lstrip("0") or "0") == target:
+            return row
+    return None
 
-    **미구현(확인 필요).** 국내 주문체결 조회의 엔드포인트·TR_ID·응답 필드명을
-    공식 문서·공식 샘플에서 확인하지 못했다(절대 규칙 4). 추측 구현을 하지 않는다.
+
+def get_order_status(order_no: str, *, ticker: str | None = None,
+                     order_date: str | None = None,
+                     org_no: str | None = None) -> "db.OrderStatus":
     """
-    raise NotImplementedError(
-        "국내주식 주문체결 조회의 엔드포인트/TR_ID/응답 필드명이 공식 문서·공식 샘플에서 "
-        "확인되지 않았습니다. 확인 전에는 추측 구현하지 않습니다. "
-        "TODO: 공식 문서 확인 후 구현."
+    국내주식 주문 1건의 체결 상태를 조회한다 (T04b).
+
+    근거: `docs/kis_api_fields.md` §2 주식일별주문체결조회
+      - `GET /uapi/domestic-stock/v1/trading/inquire-daily-ccld`
+      - 모의 3개월 이내 `VTTC0081R` / 실전 `TTTC0081R`
+      - **한 번 호출 최대 건수: 실전 100건, 모의 15건.** 그래서 `ODNO`(주문번호)로
+        좁혀 조회하고, 결과에서 그 주문번호를 **못 찾으면 조회 실패**로 처리한다
+        (다른 주문의 체결을 이 주문 것으로 오인하지 않기 위함).
+      - 응답은 `output1` 배열(소문자 키)만 쓴다. `output2` 는 문서 안에서 필드명과
+        한글명이 어긋나 있어 신뢰하지 않는다(문서가 그렇게 적고 있다).
+
+    사용 필드(문서 §2 output1 표): `odno`, `ord_qty`, `tot_ccld_qty`, `avg_prvs`,
+    `rmn_qty`, `rjct_qty`, `cncl_yn`.
+
+    상태 판정 (문서에 상태 코드표가 없어 **확인된 필드만으로** 판정한다)
+      - `cncl_yn` 이 "Y"      → CANCELED
+      - `rjct_qty` > 0        → REJECTED
+      - `tot_ccld_qty` >= 주문수량 → FILLED
+      - 0 < `tot_ccld_qty`    → PARTIAL
+      - 그 외                 → SUBMITTED
+    # VERIFY: 문서에 주문 상태 코드 필드가 없어 위 규칙은 **해석**이다. 실제 상태 코드가
+    #         있는 응답을 보게 되면 그 값으로 교체해야 한다.
+
+    Args:
+        order_date: 조회 기준일(YYYYMMDD). None 이면 오늘(KST).
+        org_no: 주문채번지점번호(`ORD_GNO_BRNO`). None 이면 빈 값으로 조회한다.
+    """
+    if not order_no:
+        raise ValueError("주문번호(order_no) 없이 체결 조회를 할 수 없습니다")
+
+    day = order_date or db.now_kst().strftime("%Y%m%d")
+    cano, prdt = _account()
+    url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+    params = {
+        "CANO": cano,
+        "ACNT_PRDT_CD": prdt,
+        "INQR_STRT_DT": day,
+        "INQR_END_DT": day,
+        "SLL_BUY_DVSN_CD": "00",     # 전체 (매도·매수)
+        "PDNO": ticker or "",
+        "ORD_GNO_BRNO": org_no or "",
+        "ODNO": str(order_no),       # 모의 15건 제한 → 주문번호로 좁힌다
+        "CCLD_DVSN": "00",           # 전체 (체결·미체결)
+        "INQR_DVSN": "00",           # 역순
+        "INQR_DVSN_1": "",
+        "INQR_DVSN_3": "00",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+    resp = _request("GET", url, _tr(_TR_CCLD), params=params)
+    resp.raise_for_status()
+    body = resp.json()
+
+    rows = body.get("output1") or []
+    row = _find_order_row(rows, order_no)
+    if row is None:
+        # 못 찾으면 조회 실패다. 0건을 "미체결"로 해석하면 실제 체결을 놓친다.
+        raise LookupError(
+            f"주문번호 {order_no} 를 체결 조회 결과에서 찾지 못했습니다 "
+            f"(조회일 {day}, {len(rows)}건). 주문 직후이거나 조회 기간이 다를 수 있습니다."
+        )
+
+    return _status_from_row(row)
+
+
+def _status_from_row(row: dict) -> "db.OrderStatus":
+    """체결 조회 output1 행 1개를 `db.OrderStatus` 로 바꾼다 (T04b)."""
+    ord_qty = _num(_ci_get(row, "ord_qty"))
+    ccld_qty = _num(_ci_get(row, "tot_ccld_qty"))
+    rjct_qty = _num(_ci_get(row, "rjct_qty"))
+    cncl_yn = (_ci_get(row, "cncl_yn") or "").strip().upper()
+    avg_prvs = _num(_ci_get(row, "avg_prvs"))
+
+    if cncl_yn == "Y":
+        status = "CANCELED"
+    elif rjct_qty > 0:
+        status = "REJECTED"
+    elif ord_qty > 0 and ccld_qty >= ord_qty:
+        status = "FILLED"
+    elif ccld_qty > 0:
+        status = "PARTIAL"
+    else:
+        status = "SUBMITTED"
+
+    return db.OrderStatus(
+        status=status, filled_qty=ccld_qty,
+        avg_fill_price=(avg_prvs if avg_prvs > 0 else None),
+        raw=dict(row),
     )
 
 
-def cancel_order(order_no: str, *, quantity: int, ticker: str) -> dict:
+def cancel_order(order_no: str, *, quantity: int, ticker: str,
+                 org_no: str | None = None) -> dict:
     """
-    국내주식 미체결 주문을 취소한다 (T04).
+    국내주식 미체결 주문을 취소한다 (T04b).
 
-    **미구현(확인 필요).** 취소 엔드포인트·TR_ID·필수 파라미터(원주문번호, 전량/부분 구분)를
-    공식 문서·공식 샘플에서 확인하지 못했다(절대 규칙 4).
+    근거: `docs/kis_api_fields.md` §3 주식주문(정정취소)
+      - `POST /uapi/domestic-stock/v1/trading/order-rvsecncl`
+      - 모의 `VTTC0013U` / 실전 `TTTC0013U`
+      - `RVSE_CNCL_DVSN_CD`: **01 정정 / 02 취소**
+      - `QTY_ALL_ORD_YN`: Y 전량 / N 일부
+      - `KRX_FWDG_ORD_ORGNO`(필수, 주문 응답의 같은 이름 값) / `ORGN_ODNO`(원주문번호)
+
+    **미구현(확인 필요) — 절대 규칙 4.** 문서에 **취소(02) 예시가 없고**, 취소 시
+    `ORD_QTY`·`ORD_UNPR` 에 어떤 값을 넣어야 하는지가 "이 파일에 없는 것" 목록에
+    명시돼 있다. 추측한 값을 넣으면 잘못된 수량·가격으로 정정/취소가 나갈 수 있다.
+    그래서 요청을 보내지 않고 여기서 막는다.
+
+    문서 §3 개요는 호출 전에 "주식정정취소가능주문조회"로 `psbl_qty` 를 확인하라고
+    권고하지만, 그 API 문서도 이 파일에 없다(`trader.get_cancelable_order()` 가
+    `NotImplementedError`). 그래서 **가능 수량 검증 없이** 취소를 보내게 된다.
+
+    TODO: 공식 문서에서 취소(02) 예시와 정정취소가능주문조회 API 를 확인하면 구현한다.
+          확인 전에는 호출부(`trader._cancel_stale_order`)가 이 예외를 잡아
+          **해당 종목 신규 매수를 차단하고 CRITICAL 로그**를 남긴다.
     """
-    # 실전 가드는 유지한다: 나중에 구현될 때 가드 없이 나가지 않도록.
+    # 실전 가드는 유지한다: 구현될 때 가드 없이 나가지 않도록.
     config.assert_order_allowed()
     raise NotImplementedError(
-        "국내주식 주문취소의 엔드포인트/TR_ID/필수 파라미터가 공식 문서·공식 샘플에서 "
-        "확인되지 않았습니다. 확인 전에는 추측 구현하지 않습니다."
+        "국내주식 주문취소는 공식 문서에 취소(02) 예시가 없고 ORD_QTY/ORD_UNPR 규칙이 "
+        "확인되지 않아 구현하지 않았습니다(docs/kis_api_fields.md). "
+        "추측한 값을 넣으면 잘못된 수량·가격으로 주문이 나갈 수 있습니다. "
+        "TODO: 취소 예시 확인 후 구현."
     )

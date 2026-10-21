@@ -1276,3 +1276,170 @@ mock 브로커만 사용했고 `main.py` 는 실행하지 않았다(import 만 �
   원문이 필요하면 마스킹 전 값을 따로 남겨야 하지만, 규칙 2상 남기지 않는 것이 맞다.
 - **스키마 변경 없음.** `db.SCHEMA_VERSION` 은 1 그대로다(T04 는 새 컬럼이 필요 없었다).
 - `data/bot.db` 는 여전히 만들어지지 않았다(테스트는 임시 DB만 씀).
+
+---
+
+# T04b — 국내 주문번호 확인과 체결 조회·취소 완성 (2026-10-21)
+
+## 0. 가장 먼저: `ORD_DVSN` 지정가/시장가가 **반대로** 되어 있었다
+
+`docs/kis_api_fields.md` §1 Request Body 의 `ORD_DVSN` 행은
+**"`00` 지정가, `01` 시장가"** 라고 명시한다. 그런데 T04 까지 코드는
+**지정가 주문에 `ORD_DVSN="01"`(시장가) 을 보내고 있었다**(`kis_domestic._DVSN_LIMIT = "01"`).
+
+결과적으로 `config.ORDER_TYPE=limit`(기본값) 으로 낸 주문은 문서 기준으로는 전부
+**시장가 요청**이었고, 게다가 `ORD_UNPR` 에는 실제 단가를 함께 보내고 있었다
+(시장가는 `ORD_UNPR="0"` 이어야 하는데 지정가 가격을 실어 보내는 모순된 요청).
+**모의투자 매도 0건의 원인이 이 값일 가능성이 있다** — 다만 이번 Task 는
+`main.py` 와 실제 모의 API 를 호출하지 않았으므로 **미확인**이다(4항 참고).
+
+수정 후: `_DVSN_LIMIT = "00"`, `_DVSN_MARKET = "01"`, `ORDER_TYPE=limit` 이면
+`ORD_UNPR` 에 문자열 가격(`"15000"`)을, `market` 이면 `"0"` 을 보낸다.
+
+## 1. 완료 여부
+
+| 요구사항 | 상태 |
+|---|---|
+| 1. `_order_refs_from_response()` 를 `output.ODNO` 로 채우기 + `KRX_FWDG_ORD_ORGNO` 저장 | **완료** |
+| 2. 국내 `get_order_status`(일별주문체결조회) 구현 | **완료** |
+| 3. 국내 `cancel_order`(정정취소) 구현 | **미완료** — 문서에 **취소(02) 예시가 없음** → 안전 동작으로 대체 |
+| 4. 국내 매수/매도 TR_ID 를 신TR로 교체 | **완료** (구TR → 신TR, 4항 참고) |
+| 5. `ORD_DVSN` 00/01 확인 및 수정 | **완료** — 위 0항 |
+| 6. 해외 체결조회·취소 미구현 시 **주문 자체를 막기** | **완료** |
+| 7. ETF 호가 단위표 | **미확인** — 문서에 없음 → `ORDER_PRICE_TICKS=0` 유지 |
+| 8. 문서 필드명 그대로의 가짜 응답 테스트(대소문자 양쪽) | **완료** |
+| 9. CHANGES/README 갱신 | **완료** (이 문서 + README TR_ID 표) |
+
+### 3번이 "미완료"인 이유와 대체 동작
+
+`docs/kis_api_fields.md` §3 주식주문(정정취소)에는 **정정(`RVSE_CNCL_DVSN_CD="01"`) 예시만**
+있고 **취소(`02`) 예시가 없다.** 정정 예시는 `ORD_QTY`/`ORD_UNPR` 에 정정할 값을 넣지만,
+**취소 시 이 두 필드에 무엇을 넣어야 하는지가 문서에 없다.** 절대 규칙 4(추측 금지)에 따라
+값을 지어내지 않았다. 취소 가능 수량을 알려면 **주식정정취소가능주문조회 API** 가 필요한데
+이 API 도 문서의 "이 파일에 없는 것 (추측 금지)" 목록에 있어 함께 막혀 있다
+(`trader.get_cancelable_order()` 로 `NotImplementedError` + 사유 문서화).
+
+대신 **요구사항 3이 지시한 안전 동작**을 구현했다: 취소 실패 시
+`trader._halt_due_to_unfilled()` 가 ①**그 종목의 신규 매수만** 차단하고
+②`CRITICAL` 로그를 남기고 ③주문 행을 `UNKNOWN` 으로 남긴다.
+`UNKNOWN` 은 `OPEN_ORDER_STATUSES` 에 속하므로 `_submit_order()` 의 중복 확인이
+그 종목의 신규 매수를 계속 막는다.
+
+**전역 중단(`reconcile.halt_trading`)을 쓰지 않은 것은 의도적이다.** 전역 플래그는
+손절·익절 매도까지 막아서, 미체결 주문 하나 때문에 손실을 방치하게 된다.
+해제 명령이 필요한 전역 플래그와 달리, 종목 단위 차단은 **주문이 확정되면 자동으로 풀린다.**
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 |
+|---|---|
+| `kis_domestic.py` | ①**신TR 4종 상수**(`_TR_BUY`/`_TR_SELL`/`_TR_CCLD`/`_TR_RVSECNCL`), 각 상수에 문서 출처 주석. ②**`_tr()` 함수 신규 정의** — 아래 "발견한 버그" 참고. ③`ORD_DVSN` 상수 정정(0항). ④`get_order_status()` 실구현. ⑤`supports_order_inquiry()` 신규(→`True`). ⑥`cancel_order()` 는 `NotImplementedError` 유지 + 사유 갱신 |
+| `kis_overseas.py` | `supports_order_inquiry()` 신규(→`False`). `request_read`/`request_order` 분리와 `get_order_status`/`cancel_order` 의 `NotImplementedError` 는 T04 그대로 |
+| `trader.py` | ①`_order_refs_from_response()` 구현(`output.ODNO`/`KRX_FWDG_ORD_ORGNO`/`ORD_TMD`, `rt_cd != "0"` 이면 `None`). ②`_stored_order_refs()` 가 v2 컬럼 우선 사용. ③`_require_settlement_support()` 를 **실제 API 호출 방식에서 능력 플래그 방식으로 교체**. ④`_call_status_fn()` 의 `except TypeError` 재시도 제거. ⑤`_halt_due_to_unfilled()` 전역 중단 → 종목 차단. ⑥`get_cancelable_order()` 신규(미구현 + 사유) |
+| `db.py` | `SCHEMA_VERSION` 1→**2**, `_MIGRATIONS` 에 `broker_org_no TEXT` 추가. `update_order_status()` 가 `broker_org_no` 를 받는다 |
+| `config.py` | `ORDER_PRICE_TICKS` 기본값 **1→0** (호가 단위표 미확인 → 값을 지어내지 않음) |
+| `README.md` | 모의↔실전 표에 **국내 TR_ID 4행 추가**(매수/매도/체결조회/정정취소) + 구TR 사용 금지 사유 |
+| `tests/test_domestic_order_api.py` | **신규 39개** |
+| `tests/test_order_safety.py` | 29개 (T04 28개 + `_call_status_fn` 시그니처 변경 반영, 스텁 `lambda no, **kw:` 로 수정) |
+
+### 발견한 기존 버그: `kis_domestic._tr()` 이 **정의되지 않은 채** 호출되고 있었다
+
+`_tr(...)` 은 **조회 3곳 + 주문 1곳**에서 호출되는데 함수 정의가 저장소에 **없었다**.
+즉 이 4개 경로는 **실행되면 `NameError` 로 죽는 상태**였다(T04b 이전부터).
+`config.IS_MOCK` 만 보고 (모의, 실전) 튜플에서 고르는 함수로 새로 정의했다.
+T04b 착수 직후 14개 테스트가 이 때문에 실패해 드러났고, `test_tr_helper_selects_by_is_mock`
+과 `test_balance_lookup_no_longer_raises_name_error` 로 고정했다.
+
+### 설계 판단: `supports_order_inquiry()` 플래그
+
+T04 의 `_require_settlement_support()` 는 **"구현됐는지"를 알려고 함수를 실제로 호출**했다
+(`get_order_status("__probe__")`). 이 방식은 ①가짜 주문번호로 **진짜 조회 요청이 나가고**
+②`except Exception: return` 이 미구현과 네트워크 장애를 구분하지 못하며
+③모듈에 플래그가 없으면 조용히 **통과**시켰다(주문이 나가도 됨).
+
+두 모듈에 `supports_order_inquiry()` 를 두고, **플래그가 아예 없는 모듈은
+"구현 여부를 알 수 없다"로 취급해 주문을 막는다.** 요구사항 6의
+"`NotImplementedError` 가 조용히 삼켜져 주문이 반복되거나 포지션이 미반영으로 남는 것"은
+이 경로로 차단된다.
+
+## 3. 테스트 결과
+
+`.venv/bin/python -m pytest` → **307 passed** (T04 종료 시 266 → +41).
+
+신규 `tests/test_domestic_order_api.py` 는 `ORDER_CASH_RESPONSE`(§1 응답 예시)와
+`CCLD_ROW`(§2 output1 예시)를 **문서에서 그대로 복사**해 썼고, 문서에 있는 키 이름만 쓴다.
+주요 케이스:
+
+- `_order_refs_from_response`: 문서 예시 그대로 / **소문자·대문자·혼합 키** 모두 통과 /
+  `ODNO` 없으면 `None` / `rt_cd != "0"` 이면 `None` / `KRX_FWDG_ORD_ORGNO` 빈 값 처리
+- `org_no` 저장 후 `_stored_order_refs()` 로 복원
+- TR_ID 상수 4종 값, 실제 전송된 TR_ID 가 모의/실전에서 바뀌는지, `_tr()` 선택
+- `ORD_DVSN`: `limit` → `"00"` + 가격 문자열, `market` → `"01"` + `"0"`, 그 외 값 → `ValueError`
+- `get_order_status`: `output1` 행에서 `FILLED`/`PARTIAL`/`REJECTED`/`CANCELED`/`SUBMITTED` 판정,
+  `odno` 를 앞자리 0 무시하고 매칭, **없으면 `LookupError`**(조회 실패로 취급)
+- `supports_order_inquiry()` 값, `_require_settlement_support()` 가 **API 를 호출하지 않고**
+  막는지, 해외 사이클이 주문 전에 막히는지
+- 취소 실패 시 **전역 중단 플래그가 서지 않고** 그 종목 매수만 막히는지(`caplog` 로 CRITICAL 확인)
+
+`main.py` 는 실행하지 않았고 **실제 모의 API 도 호출하지 않았다**(모든 응답은 문서 기반 가짜 응답).
+
+## 4. 확인하지 못한 항목 (`# VERIFY`)
+
+1. **모의투자에서 주문 응답에 `ODNO` 가 실제로 오는지.** 요구사항 1의 전제다.
+   `output.ODNO` 가 비어 오면 주문번호를 못 얻어 체결 조회·취소가 다시 전부 막힌다.
+   코드는 `ODNO` 를 못 얻으면 `ERROR` 로그를 남기되 주문 행은 `SUBMITTED` 로 남긴다
+   (재시도하지 않음 — 절대 규칙 3).
+2. **`ORD_DVSN` 역전이 실제 원인이었는지.** 0항의 가설이며 모의 API 실호출로만 확인 가능.
+3. **`ORD_GNO_BRNO`(요구사항 2에서 `org_no` 로 넘기는 값)의 정확한 의미.**
+   §1 에서는 주문 응답의 `KRX_FWDG_ORD_ORGNO`(string(5), 예 `"06010"`),
+   §2 조회 파라미터로는 `ORD_GNO_BRNO` 라는 이름이다. 같은 값으로 보지만
+   **문서가 두 이름이 동일하다고 명시하지 않았다.** 틀리면 조회가 빈 결과를 주고,
+   코드는 이를 `LookupError`(조회 실패)로 처리해 **주문을 확정하지 못한다**(안전한 방향).
+4. **모의 서버의 `avg_prvs` 형식.** §2 예시 행에서 `avg_prvs` 가 `"0"`(체결 0건)이라
+   체결 시 소수점을 포함하는지 알 수 없다. `_status_from_row()` 는 `float()` 변환만 하고
+   `"0"` 이면 `avg_fill_price=None` 으로 둔다.
+5. **`SLL_BUY_DVSN_CD`/`INQR_DVSN` 등 조회 파라미터의 허용값.** 문서 §2 는 필드 목록을
+   주지만 각 코드값의 의미표는 없다. 코드는 `SLL_BUY_DVSN_CD="00"`(전체)만 쓴다.
+6. **ETF 호가 단위표**(요구사항 7). 문서에 없다 → `_TICK_TABLE` 은 남겨 두되
+   `config.ORDER_PRICE_TICKS` 기본값을 **0** 으로 두어 틱 보정을 하지 않는다.
+   즉 현재는 현재가를 **그대로** 지정가로 낸다.
+7. **`cancel_order` 의 `ORD_QTY`/`ORD_UNPR` 규칙**(요구사항 3). 문서에 취소 예시가 없어
+   구현하지 않았다. 1항의 "3번이 미완료인 이유" 참고.
+8. **해외 TR_ID**(README 표). `docs/kis_api_fields.md` 에 해외 주문 API 가 없어
+   기존 값을 그대로 두었다(`# VERIFY` 표기).
+9. **`data/bot.db` 실사용 마이그레이션.** 스키마 v2(`broker_org_no`)는 테스트의 임시 DB 에서만
+   검증됐다. 실제 DB 파일에서 v1→v2 마이그레이션이 도는 것은 미확인.
+
+## 5. 사용자가 결정해야 할 질문
+
+1. **취소(02) 파라미터를 어디서 확인할까요?**
+   공식 GitHub 샘플(`koreainvestment/open-trading-api`)의 정정취소 예제, 또는
+   주식정정취소가능주문조회 API 문서를 `docs/kis_api_fields.md` 에 **추가**해 주시면
+   T04b 의 남은 한 건을 바로 구현할 수 있습니다. 추가 전에는 구현하지 않습니다.
+2. **`ORD_GNO_BRNO` 를 `KRX_FWDG_ORD_ORGNO` 와 같은 값으로 봐도 될까요?** (4항 3번)
+   다르다면 §2 조회에서 `org_no` 를 빼야 합니다.
+3. **`ORDER_PRICE_TICKS` 를 0 으로 둔 채 모의투자를 돌려볼까요?**
+   지정가가 호가 단위에 맞지 않으면 주문이 거부됩니다. 0 이면 현재가 그대로라
+   거부될 가능성이 있습니다(현재가는 보통 호가 단위에 맞지만 보장되지 않음).
+4. **모의투자 1회 실행으로 4항 1·2·3번을 확인해도 될까요?**
+   이번 Task 에서는 API 를 호출하지 않았습니다. 확인 절차는 `docs/manual_checks.md` 에 있습니다.
+5. **`docs/manual_checks.md` 에 국내 체결 조회·주문번호 확인 절차를 추가할까요?**
+   (T04b 에서는 요구사항 범위 밖이라 추가하지 않았습니다.)
+
+## 6. 다음 Task에 영향을 주는 사항
+
+- **`db.SCHEMA_VERSION` 이 2** 다. `orders.broker_org_no` 가 추가됐다.
+  기존 DB 파일은 열 때 마이그레이션이 돈다(실사용 미검증 — 4항 9번).
+- **국내 주문 경로가 신TR(`VTTC0012U`/`VTTC0011U` 등)로 바뀌었다.** 모의투자 1회 실행 전까지
+  주문이 실제로 접수되는지는 미확인이다. **구TR로 되돌리지 마세요**(문서가 사용 금지 명시).
+- **`_require_settlement_support()` 는 이제 능력 플래그를 본다.**
+  새 브로커 모듈을 추가하면 **`supports_order_inquiry()` 를 반드시 정의**해야 한다.
+  없으면 그 모듈의 주문은 전부 `NotImplementedError` 로 막힌다(의도된 동작).
+- **`_call_status_fn()` 의 `TypeError` 재시도가 제거됐다.** `status_fn` 은
+  `(order_no, *, ticker=None, org_no=None)` 시그니처를 받아야 한다.
+  단일 인자 스텁을 쓰던 테스트는 `lambda no, **kw:` 로 고쳐야 한다(T04 테스트에서 수정함).
+- **미체결 취소 실패는 전역 중단이 아니라 그 종목 매수 차단**이다.
+  전역 플래그 해제 명령을 안내하는 문서가 있으면 이 경로와 헷갈리지 않게 주의하세요.
+  종목 차단은 주문이 확정되면 자동 해제된다.
+- **아직 남은 T04b 항목**: `cancel_order`(1항 참고), `get_cancelable_order`. 둘 다 문서 추가가 선행 조건.
+- `main.py` 는 이번 Task 에서 **한 번도 실행하지 않았다.**

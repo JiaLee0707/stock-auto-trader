@@ -58,41 +58,55 @@ def test_migration_applies_only_missing_versions(conn, tmp_path, monkeypatch):
     """
     마이그레이션은 **아직 적용되지 않은 버전만** 순서대로 적용한다.
 
-    이미 v1 인 DB 에 v2 를 추가했을 때 v1 스크립트를 다시 돌리면
+    이미 최신인 DB 에 새 버전을 추가했을 때 기존 스크립트를 다시 돌리면
     (예: 기존 테이블을 지우는 문장이 있으면) 데이터가 날아간다.
     """
     p = tmp_path / "bot.db"
-    # v1 만 적용된 상태를 만든다
+    cur = db.SCHEMA_VERSION          # 새 버전이 추가돼도 테스트가 깨지지 않게 한다
+    nxt = cur + 1
+
+    # 현재 버전까지만 적용된 상태를 만든다
     c1 = db.open_db(p)
-    assert db.schema_version(c1) == 1
+    assert db.schema_version(c1) == cur
     db.upsert_position(c1, "QQQ", "overseas", qty=3, avg_price=100.0)
     c1.close()
 
-    # v2 를 추가한 상태로 다시 연다
-    monkeypatch.setattr(db, "SCHEMA_VERSION", 2)
+    # 다음 버전을 추가한 상태로 다시 연다
+    monkeypatch.setattr(db, "SCHEMA_VERSION", nxt)
     monkeypatch.setattr(db, "_MIGRATIONS", db._MIGRATIONS + [
-        (2, "ALTER TABLE positions ADD COLUMN test_note TEXT;"),
+        (nxt, "ALTER TABLE positions ADD COLUMN test_note TEXT;"),
     ])
 
     c2 = db.open_db(p)
     try:
-        assert db.schema_version(c2) == 2
-        # v1 데이터가 살아 있어야 한다 (v1 을 재실행하지 않았다는 증거)
+        assert db.schema_version(c2) == nxt
+        # 기존 데이터가 살아 있어야 한다 (이전 마이그레이션을 재실행하지 않았다는 증거)
         assert db.get_position(c2, "QQQ", "overseas")["qty"] == 3.0
         cols = {r["name"] for r in c2.execute("PRAGMA table_info(positions)")}
-        assert "test_note" in cols, "v2 마이그레이션이 적용되지 않았다"
+        assert "test_note" in cols, "새 마이그레이션이 적용되지 않았다"
     finally:
         c2.close()
 
 
 def test_failed_migration_raises_database_unavailable(tmp_path, monkeypatch):
     """깨진 마이그레이션은 DatabaseUnavailable — 반쯤 적용된 스키마로 시작하지 않는다."""
+    nxt = db.SCHEMA_VERSION + 1
     monkeypatch.setattr(db, "_MIGRATIONS", db._MIGRATIONS + [
-        (2, "THIS IS NOT VALID SQL;"),
+        (nxt, "THIS IS NOT VALID SQL;"),
     ])
-    monkeypatch.setattr(db, "SCHEMA_VERSION", 2)
+    monkeypatch.setattr(db, "SCHEMA_VERSION", nxt)
     with pytest.raises(db.DatabaseUnavailable):
         db.open_db(tmp_path / "bot.db")
+
+
+def test_v2_adds_broker_org_no_column(tmp_path):
+    """T04b: 취소에 필요한 KRX_FWDG_ORD_ORGNO 를 저장할 컬럼이 있어야 한다."""
+    c = db.open_db(tmp_path / "bot.db")
+    try:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(orders)")}
+        assert "broker_org_no" in cols
+    finally:
+        c.close()
 
 
 def test_open_fails_on_corrupt_file(tmp_path):

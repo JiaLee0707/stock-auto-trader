@@ -231,7 +231,11 @@ ORDER_TYPE = os.getenv("ORDER_TYPE", "limit").strip().lower()
 
 # 지정가 주문 시 현재가에서 몇 호가(틱) 떨어진 가격으로 낼지.
 # 매수는 현재가 + N틱(체결 가능성↑), 매도는 현재가 - N틱. 0이면 현재가 그대로.
-ORDER_PRICE_TICKS = int(os.getenv("ORDER_PRICE_TICKS", "1"))
+# T04b: 기본값을 1 → 0 으로 내렸다. 국내 호가 단위표(kis_domestic._TICK_TABLE)가
+#        일반 주식 호가표인지 ETF 호가표인지 근거를 찾지 못했다. 틱을 옮기지 않으면
+#        그 표가 틀려도 주문에 영향이 없다. 표가 확인되면 1 이상으로 올린다.
+# VERIFY: ETF 호가 단위표 근거 미확인 (docs/kis_api_fields.md "이 파일에 없는 것").
+ORDER_PRICE_TICKS = int(os.getenv("ORDER_PRICE_TICKS", "0"))
 
 # 미체결 주문을 이 시간(분)까지 기다렸다가 취소한다. 0 이하면 자동 취소 비활성.
 ORDER_TIMEOUT_MINUTES = float(os.getenv("ORDER_TIMEOUT_MINUTES", "30"))

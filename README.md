@@ -154,6 +154,15 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 | 주문 가능 시간 | 국내 09:00~15:30 KST / 해외 09:30~16:00 ET 정규장만 | 정규장만 (코드가 동일하게 제한) |
 | 매도 TR_ID (해외) | `VTTS0308U` | `TTTS0308U` |
 | 매수 TR_ID (해외) | `VTTT1002U` | `TTTT1002U` |
+| 매수 TR_ID (국내) | `VTTC0012U` | `TTTC0012U` |
+| 매도 TR_ID (국내) | `VTTC0011U` | `TTTC0011U` |
+| 체결조회 TR_ID (국내) | `VTTC0081R` | `TTTC0081R` |
+| 정정취소 TR_ID (국내) | `VTTC0013U` | `TTTC0013U` |
+
+국내 TR_ID는 T04b(`docs/kis_api_fields.md` §1~§3)에서 신TR로 교체했습니다.
+구TR(`VTTC0802U`/`TTTC0802U`, `VTTC0801U`/`TTTC0801U`, `VTTC0803U`/`TTTC0803U`)은
+공식 문서가 "사전 고지 없이 막힐 수 있음"이라고 명시해 사용하지 않습니다.
+해외 TR_ID는 `docs/kis_api_fields.md`에 해외 주문 API가 없어 **확인 필요**(`# VERIFY`)입니다.
 
 `TRADING_MODE`는 모드 판정에 쓰이지 않습니다. `IS_MOCK_TRADING`에서 유도한 표시용 값이며,
 환경변수로 다른 값을 넣으면 조용히 무시하지 않고 **즉시 종료**합니다(모드 판정이 두 곳으로 갈라지는 것을 막기 위함).

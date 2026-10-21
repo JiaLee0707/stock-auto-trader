@@ -74,7 +74,7 @@ KV_TRADING_HALTED = "trading_halted"
 KV_HALT_REASON = "trading_halted_reason"
 KV_PEAK_EQUITY = "peak_equity"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # 잠금 대기 시간(ms). 잠긴 DB 를 오래 붙잡고 있지 않도록 짧게 잡는다.
 # 이 값이 곧 "잠김을 얼마나 기다린 뒤 실패로 알릴지"이므로 테스트에서 낮춰 검증한다.
@@ -159,6 +159,12 @@ _MIGRATIONS: list[tuple[int, str]] = [
     CREATE TABLE IF NOT EXISTS schema_version (
         version INTEGER NOT NULL
     );
+    """),
+    # v2 (T04b): 취소(order-rvsecncl)에 KRX_FWDG_ORD_ORGNO 가 필수다.
+    # 주문(현금) 응답의 output.KRX_FWDG_ORD_ORGNO 를 저장해야 취소할 수 있다.
+    # 근거: docs/kis_api_fields.md §1 Response Body / §3 Request Body.
+    (2, """
+    ALTER TABLE orders ADD COLUMN broker_org_no TEXT;
     """),
 ]
 
@@ -438,6 +444,7 @@ def update_order_status(conn: sqlite3.Connection, order_id: int, *,
                         status: str, filled_qty: float | None = None,
                         avg_fill_price: float | None = None,
                         broker_order_no: str | None = None,
+                        broker_org_no: str | None = None,
                         raw_response: dict | None = None,
                         at: str | None = None) -> None:
     """주문 상태를 갱신한다. 상태 값은 `ORDER_STATUSES` 만 허용한다."""
@@ -455,6 +462,9 @@ def update_order_status(conn: sqlite3.Connection, order_id: int, *,
     if broker_order_no is not None:
         sets.append("broker_order_no = ?")
         params.append(broker_order_no)
+    if broker_org_no is not None:
+        sets.append("broker_org_no = ?")
+        params.append(broker_org_no)
     if raw_response is not None:
         sets.append("raw_response = ?")
         params.append(json.dumps(raw_response, ensure_ascii=False, default=str))
