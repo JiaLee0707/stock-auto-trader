@@ -17,11 +17,15 @@
 알림(T09)은 아직 없다. 중단 지점에 TODO 를 남겼다.
 """
 import logging
+from datetime import datetime
 
 import config
 import db
 
 logger = logging.getLogger("bot")
+
+# 수량 비교 허용 오차. 대조·유예 판정에서 같은 기준을 쓴다.
+_QTY_EPS = 1e-6
 
 
 def _index_by_key(entries: list[dict]) -> dict:
@@ -81,7 +85,7 @@ def compare_positions(db_positions: list[dict], broker_holdings: list[dict]) -> 
     }
 
 
-def _qty_equal(a, b, eps: float = 1e-6) -> bool:
+def _qty_equal(a, b, eps: float = _QTY_EPS) -> bool:
     """수량 비교. 주식 수량은 정수지만 부동소수 변환 오차를 허용한다."""
     try:
         return abs(float(a) - float(b)) < eps
@@ -109,6 +113,102 @@ def fetch_broker_holdings() -> list[dict]:
     else:
         logger.info("[reconcile] 국내 운용 비활성 — 국내 잔고 조회 생략")
     return holdings
+
+
+def _open_orders_by_key(conn) -> dict:
+    """미확정 주문(`SUBMITTED`/`PARTIAL`/`UNKNOWN`)을 (symbol, market) 키로 묶는다."""
+    out: dict = {}
+    for o in db.list_open_orders(conn):
+        out.setdefault(db.position_key(o["symbol"], o["market"]), []).append(o)
+    return out
+
+
+def _order_age_minutes(order: dict, now) -> float:
+    """주문이 얼마나 오래 미확정 상태로 남았는지(분). 시각을 못 읽으면 아주 오래된 것으로 본다."""
+    raw = order.get("created_at")
+    if not raw:
+        return float("inf")
+    try:
+        return (now - datetime.fromisoformat(raw)).total_seconds() / 60.0
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def _pending_qty(orders: list[dict], side: str) -> float:
+    """아직 확정되지 않은 주문의 수량 합계(방향별)."""
+    return sum(float(o.get("qty") or 0.0) for o in orders if o.get("side") == side)
+
+
+def _split_pending(result: dict, open_orders: dict, *, now,
+                   max_age_minutes: float) -> tuple[dict, list, list]:
+    """
+    불일치를 "미확정 주문으로 설명되는 것"과 "설명되지 않는 것"으로 나눈다 (T04).
+
+    T04 부터 포지션은 **체결 확인 후에만** 반영되므로, 주문 접수 직후에는
+    "브로커에는 있고 DB 에는 없는" 상태가 정상적으로 존재한다. 이걸 그대로 불일치로
+    보면 매수 직후 매 사이클마다 매매가 멈춘다. 그래서 **미확정 주문 수량만큼**은
+    불일치로 세지 않고 WARNING 으로만 남긴다.
+
+    단 그 유예에는 상한이 있다. 미확정 상태로 `max_age_minutes` 를 넘긴 주문은
+    유예하지 않는다(체결 조회·취소가 동작하지 않는다는 뜻이므로 사람이 봐야 한다).
+
+    반환: (설명되지 않은 불일치만 남긴 result, 유예 목록, 만료된 주문 목록)
+    """
+    now_orders: dict = {}
+    stale: list[dict] = []
+    for key, orders in open_orders.items():
+        for o in orders:
+            (stale if _order_age_minutes(o, now) > max_age_minutes else now_orders.setdefault(key, [])).append(o)
+
+    pending: list[tuple] = []
+    remaining = {"matched": result["matched"], "qty_mismatch": [], "db_only": [],
+                 "broker_only": []}
+
+    for key, db_pos, broker_pos in result["qty_mismatch"]:
+        orders = now_orders.get(key, [])
+        expected = (float(db_pos.get("qty", 0)) + _pending_qty(orders, "BUY")
+                    - _pending_qty(orders, "SELL"))
+        if _qty_equal(expected, broker_pos.get("qty", 0)):
+            pending.append(("수량불일치", key, db_pos, broker_pos, orders))
+        else:
+            remaining["qty_mismatch"].append((key, db_pos, broker_pos))
+
+    for key, db_pos in result["db_only"]:
+        orders = now_orders.get(key, [])
+        expected = float(db_pos.get("qty", 0)) - _pending_qty(orders, "SELL")
+        if expected <= _QTY_EPS:
+            pending.append(("DB만", key, db_pos, {"qty": 0}, orders))
+        else:
+            remaining["db_only"].append((key, db_pos))
+
+    for key, broker_pos in result["broker_only"]:
+        orders = now_orders.get(key, [])
+        expected = _pending_qty(orders, "BUY")
+        if _qty_equal(expected, broker_pos.get("qty", 0)):
+            pending.append(("외부보유", key, {"qty": 0}, broker_pos, orders))
+        else:
+            remaining["broker_only"].append((key, broker_pos))
+
+    remaining["is_consistent"] = not (
+        remaining["qty_mismatch"] or remaining["db_only"] or remaining["broker_only"]
+    )
+    return remaining, pending, stale
+
+
+def _report_pending(pending: list, stale: list) -> None:
+    """유예 중인 불일치(미확정 주문)와 만료된 주문을 로그로 남긴다."""
+    for kind, key, db_pos, broker_pos, orders in pending:
+        ids = ", ".join(f"#{o['id']}({o['side']} {o.get('qty'):g} {o['status']})" for o in orders)
+        logger.warning(
+            f"[reconcile] {kind} {key} 유예 — 미확정 주문 {ids} 으로 설명됩니다 "
+            f"(DB {db_pos.get('qty')} / 브로커 {broker_pos.get('qty')}). 체결 확정 시 해소됩니다."
+        )
+    for o in stale:
+        logger.error(
+            f"[reconcile] 주문 #{o['id']} 이 {o['status']} 상태로 "
+            f"{config.ORDER_TIMEOUT_MINUTES:g}분을 넘겼습니다 — 체결 조회/취소가 동작하지 않습니다. "
+            f"{o['symbol']} {o['side']} {o.get('qty'):g}주, 주문번호 {o.get('broker_order_no') or '없음'}"
+        )
 
 
 def _report(result: dict) -> None:
@@ -208,6 +308,16 @@ def reconcile(conn, *, holdings: list[dict] | None = None,
     if autofix is None:
         autofix = config.RECONCILE_AUTOFIX
 
+    # 중단 플래그가 서 있으면 **매 사이클** CRITICAL 로 사유와 해제 방법을 남긴다 (T04).
+    # 조용히 지나가면 봇이 돌고 있는데 매매만 안 되는 상태를 사용자가 눈치채지 못한다.
+    if is_trading_halted(conn):
+        logger.critical(
+            f"🚨 신규 매매 중단 중 — 사유: {halt_reason(conn) or '사유 미기록'}\n"
+            f"   해제: 불일치를 확인한 뒤 아래를 실행하세요.\n"
+            f"   .venv/bin/python -c \"import db, reconcile; c=db.open_db(); "
+            f"reconcile.resume_trading(c); c.close()\""
+        )
+
     db_positions = db.list_positions(conn, status="OPEN")
     # EXTERNAL 은 봇이 관리하지 않는 보유지만 대조에서는 "브로커에 있음"으로 봐야
     # 매 사이클마다 외부 보유로 다시 잡히지 않는다.
@@ -219,6 +329,20 @@ def reconcile(conn, *, holdings: list[dict] | None = None,
     result = compare_positions(db_positions, holdings)
     result["halted"] = False
     result["autofixed"] = False
+
+    # 미확정 주문으로 설명되는 불일치는 유예한다 (T04). 상한을 넘긴 주문은 유예하지 않는다.
+    open_orders = _open_orders_by_key(conn)
+    if open_orders:
+        result, pending, stale = _split_pending(
+            result, open_orders, now=db.now_kst(),
+            max_age_minutes=config.ORDER_TIMEOUT_MINUTES,
+        )
+        result["pending_orders"] = pending
+        result["stale_orders"] = stale
+        # _split_pending 이 돌려주는 dict 에는 이 키들이 없으므로 다시 채운다.
+        result["halted"] = False
+        result["autofixed"] = False
+        _report_pending(pending, stale)
 
     if result["is_consistent"]:
         logger.info(f"[reconcile] 브로커 ↔ DB 일치 ({len(result['matched'])}건)")

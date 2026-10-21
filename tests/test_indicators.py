@@ -206,16 +206,27 @@ def test_evaluate_sell_signal_requires_both_conditions(monkeypatch):
 
 # ── evaluate_or_none ─────────────────────────────────────
 
-def test_evaluate_or_none_returns_none_on_empty():
-    assert ind.evaluate_or_none(lambda: []) is None
+def test_evaluate_or_none_raises_on_empty():
+    """종가가 비어 있으면 '신호 없음'이 아니라 '데이터 없음'으로 구분한다 (T04)."""
+    with pytest.raises(ind.IndicatorDataUnavailable):
+        ind.evaluate_or_none(lambda: [])
 
 
-def test_evaluate_or_none_swallows_exception():
-    """조회 함수가 예외를 던지면 None을 반환하고 로그만 남긴다 (T04 재검토 대상)."""
+def test_evaluate_or_none_raises_on_fetch_failure():
+    """조회 실패를 삼키지 않는다 — 삼키면 하락률 폴백 매수로 이어진다 (T04)."""
     def boom():
         raise ValueError("network")
 
-    assert ind.evaluate_or_none(boom) is None
+    with pytest.raises(ind.IndicatorDataUnavailable):
+        ind.evaluate_or_none(boom)
+
+
+def test_evaluate_insufficient_data_is_no_signal_not_error():
+    """데이터는 있고 계산만 불가하면 예외가 아니라 '신호 없음'(False)이다 (T04 경계)."""
+    r = ind.evaluate_or_none(lambda: [100.0, 101.0, 102.0])
+    assert r is not None
+    assert r["buy_signal"] is False
+    assert r["sell_signal"] is False
 
 
 def test_evaluate_or_none_passes_through_result(zigzag):

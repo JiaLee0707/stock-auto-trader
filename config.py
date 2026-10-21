@@ -223,3 +223,15 @@ DB_PATH = os.getenv("DB_PATH", "data/bot.db")
 # VERIFY: 자동 보정을 켜면 봇이 만든 포지션이 아닌 것까지 DB 에 편입된다.
 #         소액 실전에서는 "중단하고 사람이 확인"이 더 안전하다고 보고 기본을 false 로 두었다.
 RECONCILE_AUTOFIX = os.getenv("RECONCILE_AUTOFIX", "false").strip().lower() == "true"
+
+# ── 주문 실행 (T04) ──────────────────────────────────────
+# 주문 유형. limit(지정가) / market(시장가). 기본 지정가.
+# 시장가는 체결은 잘 되지만 슬리피지를 통제할 수 없어 기본을 지정가로 둔다.
+ORDER_TYPE = os.getenv("ORDER_TYPE", "limit").strip().lower()
+
+# 지정가 주문 시 현재가에서 몇 호가(틱) 떨어진 가격으로 낼지.
+# 매수는 현재가 + N틱(체결 가능성↑), 매도는 현재가 - N틱. 0이면 현재가 그대로.
+ORDER_PRICE_TICKS = int(os.getenv("ORDER_PRICE_TICKS", "1"))
+
+# 미체결 주문을 이 시간(분)까지 기다렸다가 취소한다. 0 이하면 자동 취소 비활성.
+ORDER_TIMEOUT_MINUTES = float(os.getenv("ORDER_TIMEOUT_MINUTES", "30"))

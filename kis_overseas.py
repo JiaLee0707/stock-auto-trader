@@ -83,30 +83,46 @@ def _headers(token: str, tr_id: str) -> dict:
 
 # KIS 모의투자는 초당 거래건수 제한이 있어 0.5초 간격으로 호출하면
 # "초당 거래건수를 초과하였습니다" (HTTP 500) 오류가 간헐 발생한다.
-# 모의/실전 공통으로 1초 이상 간격을 두고, rate limit이면 짧게 대기 후 재시도한다.
+# 모의/실전 공통으로 1초 이상 간격을 두고, 조회는 rate limit이면 짧게 대기 후 재시도한다.
 _MIN_CALL_INTERVAL_SEC = 1.0
 _RETRY_SLEEP_SEC = 1.5
+_REQUEST_TIMEOUT_SEC = 10
 _last_call_ts = 0.0
 
 
-def _request(method: str, url: str, tr_id: str, *, max_attempts: int = 3, **kwargs):
+class OrderRequestError(RuntimeError):
     """
-    KIS API 공통 호출 래퍼.
-    - 호출 간 최소 간격을 보장해 초당 거래건수 제한을 회피
-    - HTTP 500(rate limit 등)이면 재시도
+    주문 요청의 결과를 확정할 수 없다(타임아웃·네트워크 오류·HTTP 500).
+
+    주문이 나갔을 수도, 안 나갔을 수도 있는 상태다. **재시도하면 중복 주문이 되므로**
+    (절대 규칙 3) 다시 보내지 않고 이 예외를 올린다. 호출부는 주문 상태를 `UNKNOWN`
+    으로 기록하고, 다음 사이클의 체결 조회로 확정될 때까지 그 종목의 신규 주문을 막는다.
+    """
+
+
+def _throttle() -> None:
+    """호출 간 최소 간격을 보장해 초당 거래건수 제한을 회피한다."""
+    since = time.monotonic() - _last_call_ts
+    if since < _MIN_CALL_INTERVAL_SEC:
+        time.sleep(_MIN_CALL_INTERVAL_SEC - since)
+
+
+def request_read(method: str, url: str, tr_id: str, *, max_attempts: int = 3, **kwargs):
+    """
+    **조회용** 요청. 재시도·백오프·호출 간격 제한을 유지한다.
+
+    조회는 멱등이라 재시도해도 부작용이 없다. 재시도가 허용되는 유일한 경로다.
     """
     global _last_call_ts
 
     last_error = None
+    resp = None
     for attempt in range(max_attempts):
-        since = time.monotonic() - _last_call_ts
-        if since < _MIN_CALL_INTERVAL_SEC:
-            time.sleep(_MIN_CALL_INTERVAL_SEC - since)
-
+        _throttle()
         try:
             resp = requests.request(
                 method, url, headers=_headers(get_access_token(), tr_id),
-                timeout=10, **kwargs,
+                timeout=_REQUEST_TIMEOUT_SEC, **kwargs,
             )
         finally:
             _last_call_ts = time.monotonic()
@@ -125,6 +141,69 @@ def _request(method: str, url: str, tr_id: str, *, max_attempts: int = 3, **kwar
             time.sleep(_RETRY_SLEEP_SEC)
 
     return last_error if last_error is not None else resp
+
+
+def request_order(method: str, url: str, tr_id: str, *, on_uncertain=None, **kwargs):
+    """
+    **주문·취소용** 요청. **재시도하지 않는다**(절대 규칙 3).
+
+    타임아웃·네트워크 오류·HTTP 500 은 "결과 미확정"이다. 이때 `on_uncertain(exc)` 를
+    호출해 호출부가 주문 상태를 `UNKNOWN` 으로 기록하게 한 뒤 `OrderRequestError` 를 올린다.
+    재시도하지 않는 이유: 타임아웃 후 재요청은 주문이 실제로 나갔을 경우 **중복 주문**이 된다.
+
+    HTTP 500(rate limit 등)도 재시도하지 않는다. 원 응답이 "초당 거래건수 초과"라면
+    주문이 거부된 것이지만, 응답을 받지 못한 경우와 구분할 수 없으므로 미확정으로 본다.
+    """
+    global _last_call_ts
+
+    try:
+        _throttle()
+        try:
+            resp = requests.request(
+                method, url, headers=_headers(get_access_token(), tr_id),
+                timeout=_REQUEST_TIMEOUT_SEC, **kwargs,
+            )
+        finally:
+            _last_call_ts = time.monotonic()
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        _handle_uncertain(on_uncertain, e)
+        raise OrderRequestError(
+            f"주문 요청 결과 미확정(네트워크/타임아웃) — 재시도하지 않습니다: {e}"
+        ) from e
+
+    if resp.status_code == 500:
+        body = ""
+        try:
+            body = str(resp.json().get("msg1", "")).strip()
+        except Exception:
+            pass
+        error = RuntimeError(f"HTTP 500 (주문 결과 미확정): {body}")
+        _handle_uncertain(on_uncertain, error)
+        raise OrderRequestError(
+            f"주문 요청이 HTTP 500 — 결과를 확정할 수 없어 재시도하지 않습니다: {body}"
+        ) from error
+
+    return resp
+
+
+def _handle_uncertain(on_uncertain, exc) -> None:
+    """결과 미확정 시 호출부 콜백을 부른다. 콜백 자체의 실패는 주문 예외를 가리면 안 된다."""
+    if on_uncertain is None:
+        return
+    try:
+        on_uncertain(exc)
+    except Exception as e:
+        logger.error(f"주문 UNKNOWN 기록 콜백 실패 — 수동 확인이 필요합니다: {e}")
+
+
+def _request(method: str, url: str, tr_id: str, **kwargs):
+    """
+    하위 호환용 별칭. **조회 전용**이다.
+
+    T04 이전에는 조회·주문이 이 함수를 공유해 주문에도 재시도가 걸려 있었다(절대 규칙 3 위반).
+    새 코드는 용도에 따라 `request_read()` / `request_order()` 를 직접 쓴다.
+    """
+    return request_read(method, url, tr_id, **kwargs)
 
 
 # ─────────────────────────────────────────────
@@ -366,74 +445,126 @@ def get_usd_krw_rate() -> float:
 # 주문
 # ─────────────────────────────────────────────
 
-def buy_shares(quantity: int, price_usd: float) -> dict:
+def order_body(quantity, price_usd: float) -> dict:
     """
-    해외주식 현금 매수 (정수 수량 기준).
-    KIS 해외주식 정규 주문 API (/uapi/overseas-stock/v1/trading/order) 사용.
+    해외 주문 공통 body (매수·매도가 같은 구조). 전송될 값 그대로.
+
+    T04: 호출부(trader)가 주문 전에 이 body 를 `orders.raw_request` 에 기록한다.
     """
-    if quantity <= 0:
-        raise ValueError(f"매수 수량은 1주 이상이어야 합니다: {quantity}")
-
-    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b)
-    config.assert_order_allowed()
-
-    # 모의: VTTT1002U, 실전: TTTT1002U (해외주식 매수주문)
-    tr_id = "VTTT1002U" if config.IS_MOCK else "TTTT1002U"
-    url = f"{config.KIS_BASE_URL}/uapi/overseas-stock/v1/trading/order"
-
     account_no, account_suffix = config.KIS_ACCOUNT_NO.split("-")
-
-    body = {
+    return {
         "CANO": account_no,
         "ACNT_PRDT_CD": account_suffix,
         "OVRS_EXCG_CD": "NAS",
         "PDNO": config.TARGET_TICKER,
         "ORD_DVSN": "00",           # 지정가 (미국 시장 기준)
-        "ORD_QTY": str(quantity),
+        "ORD_QTY": str(int(quantity)),
         "OVRS_ORD_UNPR": str(round(price_usd, 2)),
         "CTAC_TLNO": "",
         "MGCO_APTM_ODNO": "",
         "ORD_SVR_DVSN_CD": "0",
     }
-    resp = _request("POST", url, tr_id, json=body)
-    resp.raise_for_status()
-    result = resp.json()
-    if str(result.get("rt_cd")) != "0":
-        raise RuntimeError(
-            f"해외 매수 주문 실패 [{result.get('msg_cd')}] {result.get('msg1', '').strip()}"
-        )
-    logger.info(f"매수 주문 완료: {config.TARGET_TICKER} {quantity}주 (${price_usd:.2f}) → {result.get('msg1')}")
-    return result
 
 
-def sell_all(quantity: float, current_price_usd: float) -> dict:
-    """보유 수량 전량 시장가 매도."""
-    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b)
+def _order_tr_id(side: str) -> str:
+    """해외 주문 TR_ID (모의/실전 분기). 모의가 다르므로 반드시 config.IS_MOCK 로 고른다."""
+    if side == "BUY":
+        # 모의: VTTT1002U, 실전: TTTT1002U (해외주식 매수주문)
+        return "VTTT1002U" if config.IS_MOCK else "TTTT1002U"
+    # 모의: VTTS0308U, 실전: TTTS0308U (해외주식 매도주문)
+    return "VTTS0308U" if config.IS_MOCK else "TTTS0308U"
+
+
+def send_order(body: dict, *, side: str, on_uncertain=None) -> dict:
+    """
+    만들어 둔 body 를 실제로 전송한다. **재시도하지 않는다**(절대 규칙 3).
+
+    KIS 해외주식 정규 주문 API (/uapi/overseas-stock/v1/trading/order) 사용.
+    `on_uncertain`: 결과 미확정(타임아웃·500) 시 호출될 콜백.
+    """
+    # 실전 가드: 이 함수가 실제 전송 지점이므로 여기에도 반드시 있어야 한다 (T01b).
     config.assert_order_allowed()
 
-    tr_id = "VTTS0308U" if config.IS_MOCK else "TTTS0308U"
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"허용되지 않는 주문 방향: {side!r}")
+
     url = f"{config.KIS_BASE_URL}/uapi/overseas-stock/v1/trading/order"
-
-    account_no, account_suffix = config.KIS_ACCOUNT_NO.split("-")
-
-    body = {
-        "CANO": account_no,
-        "ACNT_PRDT_CD": account_suffix,
-        "OVRS_EXCG_CD": "NAS",
-        "PDNO": config.TARGET_TICKER,
-        "ORD_DVSN": "00",
-        "ORD_QTY": str(quantity),
-        "OVRS_ORD_UNPR": str(current_price_usd),
-        "CTAC_TLNO": "",
-        "MGCO_APTM_ODNO": "",
-        "ORD_SVR_DVSN_CD": "0",
-    }
-    resp = _request("POST", url, tr_id, json=body)
+    resp = request_order("POST", url, _order_tr_id(side), json=body,
+                         on_uncertain=on_uncertain)
     resp.raise_for_status()
     result = resp.json()
     if str(result.get("rt_cd")) != "0":
+        action = "해외 매수 주문" if side == "BUY" else "해외 매도 주문"
         raise RuntimeError(
-            f"해외 매도 주문 실패 [{result.get('msg_cd')}] {result.get('msg1', '').strip()}"
+            f"{action} 실패 [{result.get('msg_cd')}] {result.get('msg1', '').strip()}"
         )
-    logger.info(f"전량 매도 주문 완료: {quantity}주 → rt_cd={result.get('rt_cd')} {result.get('msg1', '').strip()}")
+    logger.info(
+        f"해외 {'매수' if side == 'BUY' else '매도'} 주문 접수: "
+        f"{body.get('PDNO')} {body.get('ORD_QTY')}주 "
+        f"(${body.get('OVRS_ORD_UNPR')}) → {result.get('msg1')}"
+    )
     return result
+
+
+def buy_shares(quantity: int, price_usd: float, *, on_uncertain=None) -> dict:
+    """
+    해외주식 현금 매수 (정수 수량 기준). (하위 호환 래퍼 — 실제 전송은 `send_order()`)
+
+    `on_uncertain`: 결과 미확정(타임아웃·500) 시 호출될 콜백. 호출부(trader)가
+    주문 상태를 `UNKNOWN` 으로 기록하는 데 쓴다. **재시도하지 않는다.**
+    """
+    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b).
+    # 다른 사전 검증보다 **먼저** 와야 한다.
+    config.assert_order_allowed()
+
+    if quantity <= 0:
+        raise ValueError(f"매수 수량은 1주 이상이어야 합니다: {quantity}")
+
+    return send_order(order_body(quantity, price_usd), side="BUY", on_uncertain=on_uncertain)
+
+
+def sell_all(quantity: float, current_price_usd: float, *, on_uncertain=None) -> dict:
+    """
+    보유 수량 전량 매도. (하위 호환 래퍼 — 실제 전송은 `send_order()`)
+
+    `on_uncertain`: 결과 미확정 시 콜백. **재시도하지 않는다** — 타임아웃 후 재요청은
+    주문이 실제로 나갔을 경우 중복 매도가 된다.
+    """
+    # 실전 가드: 다른 사전 검증보다 먼저 (T01b)
+    config.assert_order_allowed()
+
+    if quantity <= 0:
+        raise ValueError(f"매도 수량은 1주 이상이어야 합니다: {quantity}")
+
+    return send_order(order_body(quantity, current_price_usd), side="SELL",
+                      on_uncertain=on_uncertain)
+
+
+def get_order_status(order_no: str, *, symbol: str | None = None) -> "OrderStatus":
+    """
+    해외주식 주문 1건의 체결 상태를 조회한다 (T04).
+
+    **미구현(확인 필요).** 해외 주문체결 조회의 엔드포인트·TR_ID·응답 필드명을
+    공식 문서·공식 샘플에서 확인하지 못했다(절대 규칙 4). 추측 구현을 하지 않는다.
+    """
+    raise NotImplementedError(
+        "해외주식 주문체결 조회의 엔드포인트/TR_ID/응답 필드명이 공식 문서·공식 샘플에서 "
+        "확인되지 않았습니다. 확인 전에는 추측 구현하지 않습니다. "
+        "TODO: 공식 문서 확인 후 구현. 그 전까지 해외 주문은 체결 확인이 불가하므로 "
+        "미체결 취소·부분체결 반영도 동작하지 않습니다."
+    )
+
+
+def cancel_order(order_no: str, *, quantity: float, symbol: str | None = None) -> dict:
+    """
+    해외주식 미체결 주문을 취소한다 (T04).
+
+    **미구현(확인 필요).** 취소 엔드포인트·TR_ID·필수 파라미터(원주문번호, 전량/부분 구분 등)를
+    공식 문서·공식 샘플에서 확인하지 못했다(절대 규칙 4).
+    """
+    # 실전 가드는 유지한다: 나중에 구현될 때 가드 없이 나가지 않도록.
+    config.assert_order_allowed()
+    raise NotImplementedError(
+        "해외주식 주문취소의 엔드포인트/TR_ID/필수 파라미터가 공식 문서·공식 샘플에서 "
+        "확인되지 않았습니다. 확인 전에는 추측 구현하지 않습니다."
+    )

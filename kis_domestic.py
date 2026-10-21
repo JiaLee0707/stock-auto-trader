@@ -14,7 +14,8 @@ KIS 국내주식 ETF API 모듈.
 import logging
 
 import config
-from kis_overseas import _request
+import db
+from kis_overseas import _request, request_order
 
 logger = logging.getLogger("bot")
 
@@ -24,10 +25,71 @@ _TR_SELL = ("VTTC0801U", "TTTC0801U")   # 현금 매도 주문
 _TR_BALANCE = ("VTTC8434R", "TTTC8434R")  # 잔고 조회
 _TR_PSBL_ORDER = ("VTTC8908R", "TTTC8908R")  # 매수가능조회
 
+# 주문 구분 코드 (ORD_DVSN). 저장소가 이미 쓰던 값만 사용한다.
+#   01 = 지정가 (기존 buy_domestic/sell_domestic_all 이 쓰던 값)
+#   00 = 시장가 (기존 코드에서 확인되지 않음 → 확인 필요)
+# VERIFY: 국내 시장가(00)는 공식 문서로 확인하지 않았다. ORDER_TYPE=market 을 쓰려면
+#         공식 문서 확인이 먼저다. 확인 전에는 지정가만 동작한다.
+_DVSN_LIMIT = "01"
+_DVSN_MARKET = "00"
 
-def _tr(pair: tuple) -> str:
-    """IS_MOCK에 따라 (모의, 실전) TR_ID 중 하나를 선택."""
-    return pair[0] if config.IS_MOCK else pair[1]
+# 국내 주식/ETF 호가 단위(틱) 구간표.
+# VERIFY: 아래 구간은 **공식 자료로 확인하지 못했다.** 저장소 코드에도 틱 계산이 없었다.
+#         값이 틀리면 지정가가 호가 단위에 맞지 않아 주문이 거부될 수 있다.
+#         주문이 거부되면 로그의 msg1 을 보고 이 표를 고쳐야 한다.
+#         확인 전까지는 _order_price() 가 "현재가 그대로"를 쓰도록 TICKS=0 을 권장한다.
+_TICK_TABLE = (
+    (2_000, 1),
+    (5_000, 5),
+    (20_000, 10),
+    (50_000, 50),
+    (200_000, 100),
+    (500_000, 500),
+)
+_TICK_TABLE_ABOVE = 1000
+
+
+def tick_size(price: float) -> int:
+    """
+    국내 주식/ETF 호가 단위(원). 가격대별 구간표를 따른다.
+
+    ETF 는 주식과 같은 호가 단위를 쓴다고 보고 있으나(확인 필요), 이 표 자체가
+    공식 자료로 검증되지 않았다. `_TICK_TABLE` 주석 참고.
+    """
+    for upper, tick in _TICK_TABLE:
+        if price < upper:
+            return tick
+    return _TICK_TABLE_ABOVE
+
+
+def _order_dvsn() -> str:
+    """설정된 주문 유형에 맞는 ORD_DVSN 코드. market 은 확인 전이라 예외로 막는다."""
+    if config.ORDER_TYPE == "market":
+        raise NotImplementedError(
+            "ORDER_TYPE=market(국내 시장가, ORD_DVSN=00)은 공식 문서로 확인되지 않았습니다. "
+            "확인 전에는 지정가(ORDER_TYPE=limit)만 사용하세요."
+        )
+    return _DVSN_LIMIT
+
+
+def _order_price(price: float, *, side: str) -> str:
+    """
+    지정가 주문가. 매수는 현재가 + N틱, 매도는 현재가 - N틱.
+
+    `ORDER_PRICE_TICKS=0` 이면 현재가 그대로다(틱 표가 검증되지 않았을 때 안전한 선택).
+    가격은 호가 단위에 맞춰 반올림한다 — 호가 단위에 맞지 않으면 주문이 거부된다.
+    """
+    ticks = max(0, int(config.ORDER_PRICE_TICKS))
+    unit = tick_size(price)
+    if ticks == 0:
+        raw = int(price)
+    else:
+        # 매수는 위로, 매도는 아래로 → 체결 가능성을 높이는 방향
+        offset = ticks * unit
+        raw = int(price + offset) if side == "BUY" else int(price - offset)
+    # 호가 단위에 맞춤
+    snapped = int(round(raw / unit) * unit) if unit > 0 else raw
+    return str(max(unit, snapped))
 
 
 def _account() -> tuple:
@@ -222,53 +284,105 @@ def get_orderable_cash(ticker: str, price: float) -> float:
     return _num(output.get("ord_psbl_cash"))
 
 
-def buy_domestic(ticker: str, quantity: int, price: float) -> dict:
-    """국내 ETF 지정가 매수."""
+def order_body(ticker: str, quantity: int, price: float, *, side: str) -> dict:
+    """
+    국내 주문 **요청 body**를 만든다 (전송될 값 그대로).
+
+    T04: 호출부(trader)가 주문을 보내기 **전에** 이 body 를 `orders.raw_request` 에
+    기록해야 "무엇을 주문했는지"를 사후에 확인할 수 있다. 그래서 body 생성을
+    전송과 분리해 노출한다.
+    """
+    if side not in ("BUY", "SELL"):
+        raise ValueError(f"허용되지 않는 주문 방향: {side!r}")
+    cano, prdt = _account()
+    return {
+        "CANO": cano,
+        "ACNT_PRDT_CD": prdt,
+        "PDNO": ticker,
+        "ORD_DVSN": _order_dvsn(),
+        "ORD_QTY": str(int(quantity)),
+        "ORD_UNPR": _order_price(price, side=side),
+    }
+
+
+def send_order(body: dict, *, side: str, on_uncertain=None) -> dict:
+    """
+    만들어 둔 body 를 실제로 전송한다. **재시도하지 않는다**(절대 규칙 3).
+
+    `on_uncertain`: 결과 미확정(타임아웃·500) 시 호출될 콜백. 호출부가 `UNKNOWN` 으로
+    기록하는 데 쓴다.
+    """
+    # 실전 가드: 이 함수가 실제 전송 지점이므로 여기에도 반드시 있어야 한다 (T01b)
+    config.assert_order_allowed()
+
+    tr_id = _tr(_TR_BUY if side == "BUY" else _TR_SELL)
+    url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash"
+    resp = request_order("POST", url, tr_id, json=body, on_uncertain=on_uncertain)
+    resp.raise_for_status()
+    action = "국내 매수 주문" if side == "BUY" else "국내 매도 주문"
+    result = _check_rt_cd(resp.json(), action)
+    logger.info(f"{action} 접수: {body.get('PDNO')} {body.get('ORD_QTY')}주 → {result.get('msg1')}")
+    return result
+
+
+def buy_domestic(ticker: str, quantity: int, price: float, *, on_uncertain=None) -> dict:
+    """
+    국내 ETF 지정가 매수. (하위 호환 래퍼 — 실제 전송은 `send_order()`)
+
+    `on_uncertain`: 결과 미확정(타임아웃·500) 시 호출될 콜백. 호출부가 `UNKNOWN` 으로
+    기록하는 데 쓴다. **재시도하지 않는다**(절대 규칙 3).
+    """
+    # 실전 가드: 다른 사전 검증보다 **먼저** 와야 한다 (T01b)
+    config.assert_order_allowed()
+
     if quantity <= 0:
         raise ValueError(f"매수 수량은 1주 이상이어야 합니다: {quantity}")
 
-    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b)
+    body = order_body(ticker, quantity, price, side="BUY")
+    return send_order(body, side="BUY", on_uncertain=on_uncertain)
+
+
+def sell_domestic_all(ticker: str, quantity: int, price: float, *, on_uncertain=None) -> dict:
+    """
+    국내 ETF 전량 매도. (하위 호환 래퍼 — 실제 전송은 `send_order()`)
+
+    `on_uncertain`: 결과 미확정 시 콜백. **재시도하지 않는다.**
+    """
+    # 실전 가드: 다른 사전 검증보다 먼저 (T01b)
     config.assert_order_allowed()
 
-    cano, prdt = _account()
-    url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash"
-    body = {
-        "CANO": cano,
-        "ACNT_PRDT_CD": prdt,
-        "PDNO": ticker,
-        "ORD_DVSN": "01",              # 지정가
-        "ORD_QTY": str(quantity),
-        "ORD_UNPR": str(int(price)),
-    }
-    resp = _request("POST", url, _tr(_TR_BUY), json=body)
-    resp.raise_for_status()
-    result = _check_rt_cd(resp.json(), "국내 매수 주문")
-    logger.info(
-        f"국내 매수 주문 완료: {ticker} {quantity}주 ({price:,.0f}원) → {result.get('msg1')}"
-    )
-    return result
-
-
-def sell_domestic_all(ticker: str, quantity: int, price: float) -> dict:
-    """국내 ETF 전량 지정가 매도."""
     if quantity <= 0:
         raise ValueError(f"매도 수량은 1주 이상이어야 합니다: {quantity}")
 
-    # 실전 가드: main() 을 거치지 않고 호출돼도 실전 오발주를 막는다 (T01b)
-    config.assert_order_allowed()
+    body = order_body(ticker, quantity, price, side="SELL")
+    return send_order(body, side="SELL", on_uncertain=on_uncertain)
 
-    cano, prdt = _account()
-    url = f"{config.KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash"
-    body = {
-        "CANO": cano,
-        "ACNT_PRDT_CD": prdt,
-        "PDNO": ticker,
-        "ORD_DVSN": "01",              # 지정가
-        "ORD_QTY": str(int(quantity)),
-        "ORD_UNPR": str(int(price)),
-    }
-    resp = _request("POST", url, _tr(_TR_SELL), json=body)
-    resp.raise_for_status()
-    result = _check_rt_cd(resp.json(), "국내 매도 주문")
-    logger.info(f"국내 전량 매도 주문 완료: {ticker} {quantity:.0f}주 → {result.get('msg1')}")
-    return result
+
+def get_order_status(order_no: str, *, ticker: str | None = None,
+                     order_date: str | None = None) -> "db.OrderStatus":
+    """
+    국내주식 주문 1건의 체결 상태를 조회한다 (T04).
+
+    **미구현(확인 필요).** 국내 주문체결 조회의 엔드포인트·TR_ID·응답 필드명을
+    공식 문서·공식 샘플에서 확인하지 못했다(절대 규칙 4). 추측 구현을 하지 않는다.
+    """
+    raise NotImplementedError(
+        "국내주식 주문체결 조회의 엔드포인트/TR_ID/응답 필드명이 공식 문서·공식 샘플에서 "
+        "확인되지 않았습니다. 확인 전에는 추측 구현하지 않습니다. "
+        "TODO: 공식 문서 확인 후 구현."
+    )
+
+
+def cancel_order(order_no: str, *, quantity: int, ticker: str) -> dict:
+    """
+    국내주식 미체결 주문을 취소한다 (T04).
+
+    **미구현(확인 필요).** 취소 엔드포인트·TR_ID·필수 파라미터(원주문번호, 전량/부분 구분)를
+    공식 문서·공식 샘플에서 확인하지 못했다(절대 규칙 4).
+    """
+    # 실전 가드는 유지한다: 나중에 구현될 때 가드 없이 나가지 않도록.
+    config.assert_order_allowed()
+    raise NotImplementedError(
+        "국내주식 주문취소의 엔드포인트/TR_ID/필수 파라미터가 공식 문서·공식 샘플에서 "
+        "확인되지 않았습니다. 확인 전에는 추측 구현하지 않습니다."
+    )

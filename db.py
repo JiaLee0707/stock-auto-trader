@@ -22,6 +22,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import config
@@ -41,6 +42,30 @@ ORDER_STATUSES = (
 )
 
 SIDES = ("BUY", "SELL")
+
+
+class OrderStatus(NamedTuple):
+    """
+    브로커가 알려준 주문 1건의 체결 상태 (T04).
+
+    `status` 는 `ORDER_STATUSES` 중 하나다. 체결 수량·평균 체결가가 아직 없으면
+    `filled_qty=0`, `avg_fill_price=None` 이다.
+    """
+
+    status: str
+    filled_qty: float = 0.0
+    avg_fill_price: float | None = None
+    raw: dict | None = None
+
+    @property
+    def is_filled(self) -> bool:
+        """전량 체결."""
+        return self.status == "FILLED"
+
+    @property
+    def is_open(self) -> bool:
+        """아직 살아 있는 주문(취소·체결 확정 전)."""
+        return self.status in ("SUBMITTED", "PARTIAL", "UNKNOWN")
 # EXTERNAL: 브로커에는 있는데 봇이 만든 기록이 없는 보유. 봇이 매도하지 않는다.
 POSITION_STATUSES = ("OPEN", "CLOSED", "EXTERNAL")
 
@@ -461,6 +486,56 @@ def list_orders(conn: sqlite3.Connection, *, symbol: str | None = None,
         f"SELECT * FROM orders {clause} ORDER BY id DESC LIMIT ?", params
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── 주문 상태 조회 (T04) ──────────────────────────────────
+
+# "아직 살아 있는" 주문 상태. 이 상태의 주문이 있으면 같은 종목·방향으로 새 주문을 내지 않는다.
+OPEN_ORDER_STATUSES = ("SUBMITTED", "PARTIAL", "UNKNOWN")
+
+
+def list_open_orders(conn: sqlite3.Connection, *, symbol: str | None = None,
+                     market: str | None = None, side: str | None = None) -> list[dict]:
+    """
+    아직 확정되지 않은 주문(`SUBMITTED`/`PARTIAL`/`UNKNOWN`) 목록 (오래된 순).
+
+    중복 주문 차단과 미체결 취소 대상 선별에 쓴다.
+    """
+    placeholders = ", ".join("?" for _ in OPEN_ORDER_STATUSES)
+    where = [f"status IN ({placeholders})"]
+    params: list = list(OPEN_ORDER_STATUSES)
+    if symbol is not None:
+        where.append("symbol = ?"); params.append(str(symbol))
+    if market is not None:
+        where.append("market = ?"); params.append(str(market))
+    if side is not None:
+        where.append("side = ?"); params.append(str(side))
+    rows = conn.execute(
+        f"SELECT * FROM orders WHERE {' AND '.join(where)} ORDER BY id", params
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def has_open_order(conn: sqlite3.Connection, *, symbol: str, market: str,
+                   side: str) -> bool:
+    """
+    같은 종목·시장·방향의 미확정 주문이 있는지 (중복 주문 방지).
+
+    있으면 새 주문을 내면 안 된다. 특히 `UNKNOWN` 은 주문이 나갔을 수도 있어
+    체결 조회로 확정되기 전까지 재주문이 곧 중복 주문이다.
+    """
+    return bool(list_open_orders(conn, symbol=symbol, market=market, side=side))
+
+
+def find_order_by_broker_no(conn: sqlite3.Connection, broker_order_no: str) -> dict | None:
+    """브로커 주문번호로 주문 1건을 찾는다."""
+    if not broker_order_no:
+        return None
+    row = conn.execute(
+        "SELECT * FROM orders WHERE broker_order_no = ? ORDER BY id DESC LIMIT 1",
+        (str(broker_order_no),),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 # ── daily_counters ────────────────────────────────────────

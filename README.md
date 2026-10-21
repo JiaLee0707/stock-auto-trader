@@ -68,6 +68,11 @@ Python 버전: `.python-version` = `3.12.15`
 | `MIN_BUY_INTERVAL_HOURS` | `2.0` | 직전 매수 후 최소 대기(시간), 2회차부터 |
 | `TAKE_PROFIT_STEPS` | `2.0:33,4.0:33,6.0:100` | 부분 익절 (`수익률%:매도비중%`) |
 | `STOP_LOSS_THRESHOLD` | `-5.0` | 손절선(%), 0 이하면 비활성 |
+| `DB_PATH` | `data/bot.db` | 상태 SQLite 경로 (T03) |
+| `RECONCILE_AUTOFIX` | `false` | 브로커↔DB 불일치 시 자동 보정 여부. 기본은 보정 없이 **매매 중단**만 (T03) |
+| `ORDER_TYPE` | `limit` | 주문 유형. `limit`(지정가)만 동작. `market`(시장가)은 미확인이라 예외 (T04) |
+| `ORDER_PRICE_TICKS` | `1` | 지정가를 현재가에서 몇 호가 옮길지. 매수 +N틱, 매도 −N틱. `0`이면 현재가 그대로 (T04) |
+| `ORDER_TIMEOUT_MINUTES` | `30` | 미체결 주문을 이 시간까지 기다렸다가 취소 (T04) |
 
 `IS_MOCK_TRADING` 값에 따라 KIS 도메인, 키, 토큰 캐시 파일이 자동 전환됩니다.
 - 모의투자: `https://openapivts.koreainvestment.com:29443`, 캐시 `token_cache_mock.json`
@@ -89,6 +94,33 @@ grep "현재 모드" logs/bot.log | tail -1    # 예: 🔒 현재 모드: 모의
 **실전 가드**: `IS_MOCK_TRADING=false`(실전)인데 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면
 어떤 API 호출보다 먼저 종료합니다. 또한 주문 함수 4개가 각자 시작 시 같은 검사를 하므로,
 `main()`을 거치지 않고 직접 호출돼도 주문이 나가지 않습니다.
+
+## 매매 중단 플래그 해제 방법
+
+브로커 보유와 DB 포지션이 어긋나면(`reconcile`) 봇이 **신규 매매를 멈춥니다.**
+이때 매 사이클마다 `🚨 신규 매매 중단 중` CRITICAL 로그가 사유와 함께 찍힙니다.
+
+```bash
+grep "신규 매매 중단" logs/bot.log | tail -1
+```
+
+**자동으로 해제되지 않습니다.** 로그로 불일치 내역을 확인한 뒤 사람이 직접 해제해야 합니다.
+
+```bash
+# 1) 사유와 현재 상태 확인
+.venv/bin/python -c "import db, reconcile; c=db.open_db(); print(reconcile.is_trading_halted(c), reconcile.halt_reason(c)); print(db.list_positions(c)); c.close()"
+
+# 2) 불일치를 확인·정리한 뒤 해제
+.venv/bin/python -c "import db, reconcile; c=db.open_db(); reconcile.resume_trading(c); c.close()"
+```
+
+주문 상태가 `UNKNOWN`(타임아웃 등)으로 남아 있으면 그 종목은 조회로 확정될 때까지
+신규 주문이 막힙니다. `ORDER_TIMEOUT_MINUTES`를 넘긴 미확정 주문은 봇이 취소를 시도하고,
+취소까지 실패하면 `[reconcile] 주문 #.. 이 ...상태로 ...분을 넘겼습니다` ERROR 로그가 남습니다.
+
+```bash
+.venv/bin/python -c "import db; c=db.open_db(); [print(o['id'], o['symbol'], o['side'], o['status'], o['created_at']) for o in db.list_open_orders(c)]; c.close()"
+```
 
 ### 로그 확인
 

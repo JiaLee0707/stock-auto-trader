@@ -23,6 +23,15 @@ logger = logging.getLogger("bot")
 INSUFFICIENT_DATA = None
 
 
+class IndicatorDataUnavailable(RuntimeError):
+    """
+    지표를 계산할 **입력 데이터 자체**를 얻지 못했다 (T04).
+
+    "신호 없음"(데이터는 있고 조건 미충족)과 구분하기 위한 예외다. 조회 실패를
+    신호 없음으로 취급하면 매매 로직이 하락률 폴백으로 흘러 잘못된 매수를 낸다.
+    """
+
+
 def _num(v) -> float:
     try:
         return float(v)
@@ -173,15 +182,29 @@ def evaluate(closes: list[float]) -> dict:
 
 def evaluate_or_none(fetch_closes) -> dict | None:
     """
-    종가 조회 함수를 받아 신호를 계산한다. 조회·계산 실패 시 None.
-    매매 판단이 지표 없이도 계속되도록 예외를 삼킨다.
+    종가 조회 함수를 받아 신호를 계산한다 (T04 개정).
+
+    반환값
+      - dict : 지표를 계산했다. `buy_signal`/`sell_signal` 이 판단 결과다.
+               데이터가 부족해 계산 자체가 불가하면 두 값 모두 False 로 온다
+               ("신호 없음"이며, 이때도 매수하지 않는다).
+      - None : 이 함수는 이제 None 을 돌려주지 않는다(하위 호환으로 타입만 남겨 둔다).
+
+    예외
+      - `IndicatorDataUnavailable` : **조회 실패 또는 종가 데이터 없음.**
+        T04 이전에는 이 경우도 None 을 돌려줬는데, 호출부(trader)가 None 을
+        "지표 신호 없음"으로 해석해 **하락률 폴백 매수**로 이어질 수 있었다.
+        데이터를 못 얻은 것과 신호가 없는 것은 다른 상태이므로 구분한다.
+        호출부는 이 예외에서 **매수를 보류**해야 한다(모르는 채 사면 안 된다).
+
+    절대 규칙 7(`try/except: pass` 금지)에 따라 예외를 삼키지 않는다.
     """
     try:
         closes = fetch_closes()
-        if not closes:
-            logger.warning("일봉 종가 없음 — 지표 신호 없이 진행")
-            return None
-        return evaluate(closes)
     except Exception as e:
-        logger.warning(f"지표 계산 실패 — 신호 없이 진행: {e}")
-        return None
+        raise IndicatorDataUnavailable(f"일봉 종가 조회 실패: {e}") from e
+
+    if not closes:
+        raise IndicatorDataUnavailable("일봉 종가 데이터 없음(빈 응답)")
+
+    return evaluate(closes)

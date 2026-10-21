@@ -184,7 +184,9 @@ def live_without_confirm(monkeypatch):
 def test_overseas_buy_blocked_before_http(live_without_confirm, monkeypatch):
     import kis_overseas
     called = []
-    monkeypatch.setattr(kis_overseas, "_request", lambda *a, **k: called.append(1))
+    # T04: 주문은 request_order() 로 나간다. _request 만 막아두면 검증이 무의미해진다.
+    monkeypatch.setattr(kis_overseas, "request_order",
+                        lambda *a, **k: called.append(1))
     with pytest.raises(RuntimeError):
         kis_overseas.buy_shares(1, 100.0)
     assert called == []
@@ -193,16 +195,29 @@ def test_overseas_buy_blocked_before_http(live_without_confirm, monkeypatch):
 def test_overseas_sell_blocked_before_http(live_without_confirm, monkeypatch):
     import kis_overseas
     called = []
-    monkeypatch.setattr(kis_overseas, "_request", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(kis_overseas, "request_order",
+                        lambda *a, **k: called.append(1))
     with pytest.raises(RuntimeError):
         kis_overseas.sell_all(1, 100.0)
+    assert called == []
+
+
+def test_overseas_cancel_blocked_before_http(live_without_confirm, monkeypatch):
+    """T04 신규: 미체결 취소도 실전 가드를 지나야 한다."""
+    import kis_overseas
+    called = []
+    monkeypatch.setattr(kis_overseas, "request_order",
+                        lambda *a, **k: called.append(1))
+    with pytest.raises(RuntimeError):
+        kis_overseas.cancel_order("B1", quantity=1.0)
     assert called == []
 
 
 def test_domestic_buy_blocked_before_http(live_without_confirm, monkeypatch):
     import kis_domestic
     called = []
-    monkeypatch.setattr(kis_domestic, "_request", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(kis_domestic, "request_order",
+                        lambda *a, **k: called.append(1))
     with pytest.raises(RuntimeError):
         kis_domestic.buy_domestic("379800", 1, 10000.0)
     assert called == []
@@ -211,9 +226,22 @@ def test_domestic_buy_blocked_before_http(live_without_confirm, monkeypatch):
 def test_domestic_sell_blocked_before_http(live_without_confirm, monkeypatch):
     import kis_domestic
     called = []
-    monkeypatch.setattr(kis_domestic, "_request", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(kis_domestic, "request_order",
+                        lambda *a, **k: called.append(1))
     with pytest.raises(RuntimeError):
         kis_domestic.sell_domestic_all("379800", 1, 10000.0)
+    assert called == []
+
+
+def test_domestic_send_order_blocked_before_http(live_without_confirm, monkeypatch):
+    """T04 신규: body 를 직접 넘겨도 전송 지점(send_order)에서 가드가 걸린다."""
+    import kis_domestic
+    called = []
+    monkeypatch.setattr(kis_domestic, "request_order",
+                        lambda *a, **k: called.append(1))
+    body = {"PDNO": "379800", "ORD_QTY": "1", "ORD_UNPR": "10000"}
+    with pytest.raises(RuntimeError):
+        kis_domestic.send_order(body, side="BUY")
     assert called == []
 
 

@@ -28,12 +28,14 @@ def _holding(symbol, qty, market="overseas", avg_price=100.0):
 # ── 주문 기록 ─────────────────────────────────────────────
 
 def test_record_order_stores_submitted_status(conn):
-    """접수만 확인했으므로 SUBMITTED 다(체결 확인은 T04/T05 범위)."""
-    order_id = trader._record_order(
+    """주문 전에 기록하는 write-ahead 행이므로 SUBMITTED 다(T04)."""
+    order_id, ref = trader._record_order_pending(
         conn, market="overseas", ticker="QQQ", side="BUY", qty=3, price=100.0,
-        order_type="LIMIT", raw_response={"rt_cd": "0"},
+        order_type="LIMIT", raw_request={"PDNO": "QQQ", "ORD_QTY": "3"},
     )
     order = db.get_order(conn, order_id)
+    assert ref == order["client_ref"]
+    assert order["status"] == "SUBMITTED"
     assert order["status"] == "SUBMITTED"
     assert order["side"] == "BUY"
     assert order["qty"] == 3.0
@@ -46,9 +48,13 @@ def test_broker_order_no_is_left_null_not_guessed(conn):
     KIS 주문 응답의 주문번호 필드명은 확인되지 않았다(절대 규칙 4).
     추측해서 채우지 않고 NULL 로 둔다.
     """
-    order_id = trader._record_order(
+    result = {"rt_cd": "0", "msg1": "주문 완료"}
+    assert trader._order_refs_from_response(result) is None, "주문번호 필드를 추측했다"
+    assert trader._order_refs_from_response(None) is None
+
+    order_id, _ref = trader._record_order_pending(
         conn, market="overseas", ticker="QQQ", side="BUY", qty=1, price=100.0,
-        order_type="LIMIT", raw_response={"rt_cd": "0", "msg1": "주문 완료"},
+        order_type="LIMIT", raw_request=None,
     )
     assert db.get_order(conn, order_id)["broker_order_no"] is None
 
@@ -56,9 +62,9 @@ def test_broker_order_no_is_left_null_not_guessed(conn):
 def test_client_ref_is_unique_per_order(conn):
     """같은 초에 두 주문이 나가도 client_ref 가 충돌하지 않아야 한다."""
     ids = [
-        trader._record_order(conn, market="overseas", ticker="QQQ", side="BUY",
-                             qty=1, price=100.0, order_type="LIMIT",
-                             raw_response=None)
+        trader._record_order_pending(conn, market="overseas", ticker="QQQ", side="BUY",
+                                     qty=1, price=100.0, order_type="LIMIT",
+                                     raw_request=None)[0]
         for _ in range(5)
     ]
     refs = {db.get_order(conn, i)["client_ref"] for i in ids}
@@ -115,8 +121,8 @@ def test_position_survives_restart(tmp_path):
     c1 = db.open_db(path)
     trader._apply_fill_to_position(c1, market="overseas", ticker="QQQ", side="BUY",
                                    qty=3, price=100.0, prev_qty=0, prev_avg=0.0)
-    trader._record_order(c1, market="overseas", ticker="QQQ", side="BUY", qty=3,
-                         price=100.0, order_type="LIMIT", raw_response=None)
+    trader._record_order_pending(c1, market="overseas", ticker="QQQ", side="BUY", qty=3,
+                                 price=100.0, order_type="LIMIT", raw_request=None)
     c1.close()
 
     c2 = db.open_db(path)
@@ -132,8 +138,10 @@ def test_recorded_buy_makes_reconcile_consistent(conn):
     이 테스트가 실패하면 봇이 첫 사이클부터 영구 정지한다.
     매수 기록이 없으면 브로커 보유가 '외부 보유'로 잡혀 중단 플래그가 선다.
     """
-    trader._record_order(conn, market="overseas", ticker="QQQ", side="BUY", qty=3,
-                         price=100.0, order_type="LIMIT", raw_response=None)
+    order_id, _ref = trader._record_order_pending(
+        conn, market="overseas", ticker="QQQ", side="BUY", qty=3,
+        price=100.0, order_type="LIMIT", raw_request=None)
+    db.update_order_status(conn, order_id, status="FILLED", filled_qty=3)
     trader._apply_fill_to_position(conn, market="overseas", ticker="QQQ", side="BUY",
                                    qty=3, price=100.0, prev_qty=0, prev_avg=0.0)
 

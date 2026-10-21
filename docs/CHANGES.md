@@ -1147,3 +1147,132 @@ ATR은 라이브러리와 정확히 일치(둘 다 Wilder 평활).
   기존 항목을 수정하면 이미 적용된 DB 와 어긋난다.
 - `data/bot.db` 는 아직 만들어지지 않았다(테스트는 임시 DB만 씀). 첫 실행 시 `main()` 이 만든다.
 
+
+---
+
+# T04 — 주문 실행 안전성 (2026-10-20)
+
+## 1. 완료 여부
+
+**부분 완료.** 요구사항 1~8 중 **6개는 완료**, 2개는 **미완료(확인 필요)**다.
+
+| # | 요구사항 | 상태 |
+|---|---|---|
+| 1 | `request_read`/`request_order` 분리 + write-ahead | **완료** |
+| 2 | `UNKNOWN` 시 그 종목 신규 주문 차단 | **완료** |
+| 3 | 체결 조회 `get_order_status()` | **미완료** — 엔드포인트·TR_ID·필드명 미확인 |
+| 4 | 미체결 취소 + 부분체결 반영 | **부분** — 배선·판정 완료, **취소 API 미구현** |
+| 5 | 중복 방지 | **완료** |
+| 6 | 체결 기준 포지션 갱신 | **완료** |
+| 7 | 지정가 기본 + 국내 틱 함수 | **완료**(틱 표는 `# VERIFY`) |
+| 8 | raw 요청/응답 저장 + 마스킹 | **완료** |
+
+미완료 2건의 원인은 **동일**하다: **KIS 주문 응답의 주문번호 필드명이 공식 문서·공식 샘플에서
+확인되지 않았다.** 주문번호를 얻지 못하면 체결 조회도 취소도 할 수 없다.
+절대 규칙 4에 따라 **추측 구현하지 않고 `NotImplementedError` + TODO 로 두었다.**
+`trader._order_refs_from_response()` 한 함수만 채우면 나머지 배선이 전부 살아난다.
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 |
+|---|---|
+| `kis_overseas.py` | `_request` 를 **`request_read()`(조회, 재시도 유지) / `request_order()`(주문, 재시도 없음)** 로 분리. 타임아웃·네트워크 오류·HTTP 500 은 `on_uncertain(exc)` 콜백 후 `OrderRequestError` — 재시도하면 중복 주문이다. `order_body()`/`send_order()` 로 body 생성과 전송을 분리(사전 기록용). `get_order_status()`/`cancel_order()` 는 `NotImplementedError` |
+| `kis_domestic.py` | 동일 분리. `order_body(ticker, qty, price, side)`/`send_order(body, side)` 신규, `buy_domestic`/`sell_domestic_all` 은 하위 호환 래퍼. **틱 함수 `tick_size()`** + `_order_price()`(매수 +N틱/매도 −N틱, 호가 단위 스냅). `get_order_status()`/`cancel_order()` 는 `NotImplementedError` |
+| `trader.py` | **write-ahead**: `_submit_order()` 가 ①중복 확인 ②`SUBMITTED` 기록 ③전송 ④주문번호 기록 순서로 낸다. **`_settle_order()`**: 체결 조회 후 **증분만** 포지션 반영, 오래된 미체결은 취소. **`_resolve_open_orders()`**: 사이클 시작 시 미확정 주문 확정. `_mask_payload()` 로 계좌번호 마스킹. `_order_refs_from_response()` 는 미구현(TODO T05) |
+| `reconcile.py` | **미확정 주문 유예**: 포지션이 체결 후에만 반영되므로 접수 직후 "브로커에만 있음"은 정상이다. 미확정 주문 수량으로 설명되는 불일치는 WARNING 으로 유예하고, `ORDER_TIMEOUT_MINUTES` 초과분은 유예하지 않는다(기존 `_report`/`_apply_autofix` 경로는 그대로) |
+| `indicators.py` | `IndicatorDataUnavailable` 신규. `evaluate_or_none()` 이 조회 실패·빈 응답에서 **예외를 던진다**(T01 보고 4-2). `None` 반환 제거 |
+| `db.py` | `OrderStatus` NamedTuple, `list_open_orders()`, `has_open_order()`, `find_order_by_broker_no()`, `OPEN_ORDER_STATUSES` 추가. **스키마 변경 없음**(마이그레이션 추가 안 함) |
+| `config.py` | `ORDER_TYPE`(limit/market), `ORDER_PRICE_TICKS`(1), `ORDER_TIMEOUT_MINUTES`(30) |
+| `README.md` | T04 환경변수 3개 + **중단 플래그 해제 방법**(실행 가능한 `python -c` 명령) |
+| `docs/manual_checks.md` | **신규.** 모의투자에서 사용자가 직접 확인할 5개 절차 |
+| `tests/test_order_safety.py` | **신규 28개.** 아래 3항 참고 |
+
+### 중단 플래그 로그 (요구사항)
+
+`trader.run_trading_cycle()` 진입부와 `reconcile.reconcile()` 이 **매 사이클 CRITICAL** 로
+사유 + 실행 가능한 해제 명령을 남긴다. README 에도 문서화했다.
+
+```bash
+.venv/bin/python -c "import db, reconcile; c=db.open_db(); reconcile.resume_trading(c); c.close()"
+```
+
+## 3. 테스트 결과
+
+`266 passed` (T04 이전 191 → 266, **신규 75개**). 실행 시간 1.77s.
+mock 브로커만 사용했고 `main.py` 는 실행하지 않았다(import 만 확인).
+
+`tests/test_order_safety.py` 가 고정한 것 (완료 기준 대응):
+
+| 완료 기준 | 테스트 |
+|---|---|
+| 타임아웃 → 재시도 없음 + `UNKNOWN` | `test_timeout_records_unknown_and_does_not_retry` (전송 횟수 1회 단언) |
+| `UNKNOWN` 종목 신규 주문 차단 | `test_unknown_order_blocks_new_orders_for_that_symbol`, `test_unknown_only_blocks_same_symbol_and_side` |
+| 미체결 타임아웃 → 취소 + 상태 갱신 | `test_stale_unfilled_order_is_canceled`, `test_fresh_unfilled_order_is_not_canceled` |
+| 부분 체결만 반영 | `test_partial_fill_reflects_only_filled_quantity`, `test_repeated_inquiry_does_not_double_count_fill` |
+| 중복 주문 차단 | `test_duplicate_order_is_blocked_before_sending`, `test_filled_order_allows_next_order` |
+| 접수만으로 포지션 미갱신 | `test_receipt_alone_does_not_create_position`, `test_sell_via_submit_does_not_touch_position_on_receipt` |
+| 접수 직후 reconcile 이 멈추지 않음 | `test_reconcile_does_not_halt_right_after_order_submitted` |
+| write-ahead | `test_order_is_recorded_before_being_sent` |
+| raw 저장 + 마스킹 | `test_raw_request_is_saved`, `test_account_numbers_are_masked_in_raw_request` |
+| 지표 조회 실패 시 매수 보류 | `test_indicator_unavailable_holds_off_buy_but_still_allows_sell` |
+
+### 기존 테스트 2건 수정 (테스트가 무의미해진 것을 고침)
+
+- `test_live_guard.py`: 주문 가드 테스트가 `_request` 만 monkeypatch 했다. T04 부터 주문은
+  `request_order()` 로 나가므로 **차단 여부와 무관하게 통과하는 가짜 테스트**가 됐다.
+  `request_order` 를 막도록 고쳤고, `send_order`/`cancel_order` 가드 테스트를 추가했다.
+- `test_trader_state_wiring.py`: `_record_order` → `_record_order_pending` 이름 변경 반영,
+  대조 일치 테스트에 `FILLED` 전이를 추가(이제 체결 후에만 포지션이 생긴다).
+
+## 4. 확인하지 못한 항목 (`# VERIFY`)
+
+1. **KIS 주문 응답의 주문번호 필드명** — 국내(`KRX_FWDG_ORD_ORGNO`/`ODNO`?), 해외.
+   공식 문서·공식 샘플(`koreainvestment/open-trading-api`)에서 **확인 실패**.
+   `trader._order_refs_from_response()` 가 `None` 을 돌려주도록 두었다.
+2. **국내 주문체결 조회** — 엔드포인트(`inquire-daily-ccld`?), TR_ID(`VTTC8001R`/`TTTC8001R`?),
+   응답 필드명. `kis_domestic.get_order_status()` 가 `NotImplementedError`.
+3. **국내 주문 취소/정정** — 엔드포인트(`order-rvsecncl`?), TR_ID(`VTTC0803U`/`TTTC0803U`?),
+   `RVSE_CNCL_DVSN_CD` 취소 값, `QTY_ALL_ORD_YN`. `kis_domestic.cancel_order()` 가 `NotImplementedError`.
+4. **해외 주문체결 조회 / 취소** — 위와 동일. `kis_overseas` 의 두 함수가 `NotImplementedError`.
+5. **국내 호가 단위(틱) 표** — `kis_domestic._TICK_TABLE` 이 공식 자료로 검증되지 않았다.
+   틀리면 지정가가 호가 단위에 안 맞아 주문이 거부된다(로그 `msg1` 로 확인 가능).
+   **확인 전까지 `ORDER_PRICE_TICKS=0`(현재가 그대로)을 권장**한다.
+6. **국내 시장가(`ORD_DVSN=00`)** — 확인 전이라 `ORDER_TYPE=market` 은 예외로 막았다.
+7. **모의투자의 체결 조회·취소 지원 여부** — 공식 문서에서 확인 못 했다.
+8. **미국 가격대별 호가 단위** — 확인 전이라 해외는 N틱 조정을 적용하지 않는다.
+
+## 5. 사용자가 결정해야 할 질문
+
+1. **주문번호 필드를 지금 확인할 방법이 있는지.** 위 1~4번이 전부 여기에 걸려 있다.
+   공식 문서 접근이 안 되면 **주문 응답 원문을 1회 로깅**해서 실제 필드명을 보는 방법이 있다
+   (모의투자에서 주문 1건 내고 `raw_response` 를 확인). 이 방법을 써도 되는지 결정 필요.
+   - 쓰기로 하면: 모의에서 주문 1건 발생 시 `orders.raw_response` 를 그대로 보여드리면
+     필드명을 확정할 수 있다.
+2. **`reconcile` 의 유예 상한을 `ORDER_TIMEOUT_MINUTES`(30분)로 둔 것이 맞는지.**
+   사이클이 1시간이라 실제로는 "다음 사이클에 확정, 안 되면 중단"이 된다. 더 짧게/길게?
+3. **T04 를 T05 로 넘길지, 여기서 주문번호 확인부터 할지.**
+   현재 상태는 "주문은 중복되지 않지만 체결·취소가 안 되는" 상태다. T03 보다 안전하지만
+   미체결 주문이 30분 뒤 매매를 멈추게 한다(모의운용에서 중단이 잦을 수 있다).
+4. **`ORDER_PRICE_TICKS` 기본값 1 유지 여부.** 틱 표가 미검증이라 위험하다고 본다면 0 으로.
+
+## 6. 다음 Task에 영향을 주는 사항
+
+- **`trader._order_refs_from_response()` 를 채우면 체결 조회·취소 배선이 전부 살아난다.**
+  `_settle_order()`/`_resolve_open_orders()`/`_cancel_stale_order()` 는 이미 완성돼 있다.
+  `kis_domestic.get_order_status()`/`cancel_order()`, `kis_overseas.get_order_status()`/
+  `cancel_order()` 의 `NotImplementedError` 를 실제 호출로 바꾸면 된다.
+- **주문 함수 시그니처 변경**: `buy_domestic`/`sell_domestic_all`/`buy_shares`/`sell_all` 에
+  `on_uncertain` 키워드가 추가됐다(기존 호출은 그대로 동작). body 생성·전송이
+  `order_body()`/`send_order()` 로 분리됐다. **`assert_order_allowed()` 는 네 함수 모두 첫 줄에
+  유지**했고, `send_order()` 에도 추가했다(전송 지점 방어).
+- **`_check_sell` 시그니처 변경**: `cancel_fn`/`status_fn` 은 제거되고 `submit_sell` 만 남았다.
+  `sell_fn` 에 `None` 을 넘기고 `submit_sell` 을 주는 것이 T04 의 정상 경로다.
+  기존 호출(`sell_fn` + `market=None`)은 그대로 동작한다.
+- **`indicators.evaluate_or_none()` 은 이제 `None` 을 반환하지 않는다.**
+  `IndicatorDataUnavailable` 을 던진다. 새 호출부는 반드시 이 예외를 잡아 **매수를 보류**해야 한다.
+- **체결 반영은 `_settle_order()` 를 통해서만** 한다. `_apply_fill_to_position()` 을 접수 직후에
+  부르면 T03 의 버그가 재현된다(미체결이 포지션에 반영 → reconcile 중단).
+- **`orders.raw_request`/`raw_response` 는 마스킹된 값**이다(`CANO`/`ACNT_PRDT_CD`).
+  원문이 필요하면 마스킹 전 값을 따로 남겨야 하지만, 규칙 2상 남기지 않는 것이 맞다.
+- **스키마 변경 없음.** `db.SCHEMA_VERSION` 은 1 그대로다(T04 는 새 컬럼이 필요 없었다).
+- `data/bot.db` 는 여전히 만들어지지 않았다(테스트는 임시 DB만 씀).
