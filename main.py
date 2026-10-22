@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,7 @@ import schedule
 
 import config
 import db
+import market_calendar
 import reconcile
 from ai_analyzer import analyze_market_sentiment
 from state import get_bot_state
@@ -43,24 +44,85 @@ ET = ZoneInfo("America/New_York")
 
 def is_regular_market_open() -> bool:
     """
-    미국 정규장 개장 여부 판단.
-    평일 09:30~16:00 ET 기준이며, 서머타임은 ET 기준이라 자동 반영된다.
+    미국 정규장 개장 여부 판단 (T05: `market_calendar` 로 대체).
+
+    이전에는 "평일이고 09:30<=t<16:00 ET" 를 직접 계산했다. 그 방식은 **휴장일과
+    반일장을 보지 못해** 휴장일에 주문을 내고 `장시작전`/`장종료` 거부를 받았다.
+    지금은 XNYS 캘린더가 휴장일·반일장·서머타임을 모두 반영한다.
+
+    하위 호환용 이름이다. 새 코드는 `market_calendar.is_market_open("US", now)` 를
+    직접 쓰는 것이 낫다 — 주문 가능 여부는 `is_order_window` 로 판단해야 한다.
     """
-    now_et = datetime.now(ET)
-    if now_et.weekday() >= 5:          # 토·일 휴장
-        return False
-    return dtime(9, 30) <= now_et.time() < dtime(16, 0)
+    return market_calendar.is_market_open(market_calendar.MARKET_US, now_et())
 
 
 def is_domestic_market_open() -> bool:
     """
-    국내 정규장 개장 여부 판단 (평일 09:00~15:30 KST).
-    모의투자는 국내·해외 모두 정규장 주문만 체결되므로 시간대를 따로 본다.
+    국내 정규장 개장 여부 판단 (T05: `market_calendar` 로 대체).
+
+    이전에는 "평일이고 09:00<=t<15:30 KST" 를 직접 계산했다. 그 방식은 설·추석
+    연휴, 크리스마스 같은 휴장일을 보지 못했다. 지금은 XKRX 캘린더가 판정한다.
     """
-    now_kst = datetime.now(KST)
-    if now_kst.weekday() >= 5:         # 토·일 휴장
-        return False
-    return dtime(9, 0) <= now_kst.time() < dtime(15, 30)
+    return market_calendar.is_market_open(market_calendar.MARKET_KRX, now_kst())
+
+
+def now_kst() -> datetime:
+    """현재 시각 (KST, tz-aware)."""
+    return datetime.now(KST)
+
+
+def now_et() -> datetime:
+    """현재 시각 (ET, tz-aware). 서머타임은 ZoneInfo 가 반영한다."""
+    return datetime.now(ET)
+
+
+# 시장 이름 → (운용 여부, 사람이 읽을 이름, 시간대). 주문 구간 판정에 쓴다.
+_MARKET_TABLE = (
+    (market_calendar.MARKET_US, lambda: config.IS_OVERSEAS_ENABLED, "해외(미국)"),
+    (market_calendar.MARKET_KRX, lambda: config.IS_DOMESTIC_ENABLED, "국내"),
+)
+
+
+def market_windows(now=None) -> dict:
+    """
+    운용 중인 시장별 **주문 가능 여부**와 사유를 계산한다 (T05).
+
+    반환: {시장 이름: {"enabled": bool, "open": bool, "orderable": bool, "reason": str}}
+
+    `orderable` 이 곧 "이 시장에 주문을 내도 되는가"다. `open` 은 거래소가 열려
+    있는지만 보고, 주문은 개장 후 `SKIP_OPEN_MINUTES` / 마감 전
+    `SKIP_CLOSE_MINUTES` 마진까지 본 `is_order_window` 로 판단한다.
+    """
+    now = now or now_kst()
+    result = {}
+    for market, enabled_fn, label in _MARKET_TABLE:
+        enabled = bool(enabled_fn())
+        local = now.astimezone(market_calendar.market_timezone(market))
+        if not enabled:
+            reason = "운용 비활성"
+            is_open = orderable = False
+        else:
+            is_open = market_calendar.is_market_open(market, local)
+            orderable = market_calendar.is_order_window(market, local)
+            if orderable:
+                reason = "주문 가능"
+            elif is_open:
+                # 장은 열렸지만 안전 마진 안이다 — 여기서 주문하면 미체결·거부가 난다.
+                reason = (
+                    f"안전 마진 구간 (개장 후 {config.SKIP_OPEN_MINUTES}분 / "
+                    f"마감 전 {config.SKIP_CLOSE_MINUTES}분 제외)"
+                )
+            else:
+                reason = "정규장 아님 (휴장일 포함)"
+        result[market] = {
+            "enabled": enabled,
+            "label": label,
+            "open": is_open,
+            "orderable": orderable,
+            "reason": reason,
+            "local_time": local,
+        }
+    return result
 
 
 def job():
@@ -71,6 +133,15 @@ def job():
     logger.info("=" * 60)
 
     # 매 사이클 시작 시 브로커 ↔ DB 대조 (T03).
+    #
+    # **장 외 시간에도 계속 실행한다** (T05 판단 근거):
+    #   - 대조의 목적은 "브로커 실제 상태 ↔ DB" 를 맞추는 것이다. 상태가 어긋난 것을
+    #     발견하는 일은 장중에만 의미가 있지 않다 — 오히려 장 외에 발견해야 개장 전에
+    #     고칠 수 있다.
+    #   - DB 쓰기(포지션·주문 상태)도 같은 이유로 계속한다. 미체결 주문이 장 마감으로
+    #     끝났는지 정리하는 것도 이때 한다.
+    #   - 반대로 **주문은 장 외에 절대 나가면 안 되므로** 아래에서 `orderable` 로 막는다.
+    #     "DB 쓰기를 스킵"하면 장 외에 쌓인 미확정 주문이 개장까지 방치된다.
     # 대조 실패는 매매를 시작하지 않는 사유다 — 상태를 모르는 채 주문하면 위험하다.
     try:
         conn = get_bot_state().conn
@@ -84,20 +155,25 @@ def job():
 
     # 모의·실전 모두 정규장에만 주문한다.
     # 모의투자는 정규장 주문만 체결되고, 실전투자는 시간외 체결 품질이 불량해 제한한다.
-    # 운용이 꺼진 시장은 개장 여부와 무관하게 False로 두어 대상에서 제외한다.
+    # `market_windows` 는 휴장일·반일장·서머타임을 캘린더로 판정하고, 개장 직후·
+    # 마감 직전의 안전 마진까지 본다 (T05).
     mode_label = "모의투자" if config.IS_MOCK else "실전투자"
-    overseas_open = config.IS_OVERSEAS_ENABLED and is_regular_market_open()
-    domestic_open = config.IS_DOMESTIC_ENABLED and is_domestic_market_open()
+    windows = market_windows()
+    us_win = windows[market_calendar.MARKET_US]
+    kr_win = windows[market_calendar.MARKET_KRX]
+    overseas_open = us_win["orderable"]
+    domestic_open = kr_win["orderable"]
+
+    summary = " / ".join(
+        f"{w['label']}: {w['reason']} ({w['local_time'].strftime('%H:%M')} 현지)"
+        for w in windows.values()
+    )
     if not (overseas_open or domestic_open):
-        now_et, now_kst = datetime.now(ET), datetime.now(KST)
-        logger.info(
-            f"   [{mode_label}] 매매 대상 없음 — 스킵 "
-            f"(해외: {'운용중' if config.IS_OVERSEAS_ENABLED else '비활성'}, "
-            f"{now_et.strftime('%H:%M')} ET / "
-            f"국내: {'운용중' if config.IS_DOMESTIC_ENABLED else '비활성'}, "
-            f"{now_kst.strftime('%H:%M')} KST)"
-        )
+        # 주문 가능 구간이 아니면 **AI 분석·시세 조회 등 어떤 API 도 호출하지 않는다.**
+        # (로그만 남기고 돌아간다 — 위에서 reconcile 은 이미 돌았다.)
+        logger.info(f"   [{mode_label}] 주문 가능 구간 아님 — API 호출 없이 스킵 ({summary})")
         return
+    logger.info(f"   [{mode_label}] 주문 구간 확인 — {summary}")
 
     try:
         # Step 1: AI 뉴스 분석
@@ -121,7 +197,8 @@ def job():
 def quick_test():
     """퀵 테스트 실행 - 설정 상태 확인 및 샘플 매매"""
     logger.info("=" * 60)
-    logger.info(f"🧪 퀵 테스트 시작 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # 시각은 tz-aware 로만 다룬다 (절대 규칙 9). 표시용이라도 naive 는 쓰지 않는다.
+    logger.info(f"🧪 퀵 테스트 시작 — {now_kst().strftime('%Y-%m-%d %H:%M:%S')} KST")
     logger.info("=" * 60)
 
     # 테스트: 설정 로드 확인

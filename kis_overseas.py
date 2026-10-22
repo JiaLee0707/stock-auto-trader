@@ -18,6 +18,7 @@ from pathlib import Path
 import requests
 
 import config
+import market_calendar
 
 logger = logging.getLogger("bot")
 
@@ -523,9 +524,18 @@ def send_order(body: dict, *, side: str, on_uncertain=None) -> dict:
     result = resp.json()
     if str(result.get("rt_cd")) != "0":
         action = "해외 매수 주문" if side == "BUY" else "해외 매도 주문"
-        raise RuntimeError(
-            f"{action} 실패 [{result.get('msg_cd')}] {result.get('msg1', '').strip()}"
-        )
+        # T05: 거부 원인 분류 (요구사항 4). 분류에 실패해도 원문은 항상 남긴다.
+        msg_cd = result.get("msg_cd")
+        msg1 = (result.get("msg1") or "").strip()
+        category = market_calendar.classify_rejection(msg_cd, msg1)
+        label = market_calendar.REJECT_LABELS.get(category, category)
+        logger.error(f"❌ {action} 거부 — 분류: {label} [{msg_cd}] {msg1}")
+        if category == market_calendar.REJECT_MARKET_CLOSED:
+            logger.warning(
+                "   ↳ 장 상태 거부입니다. 주문 구간 판정(is_order_window)과 불일치 — "
+                "EXTRA_HOLIDAYS 또는 SKIP_OPEN/CLOSE_MINUTES 를 확인하세요."
+            )
+        raise RuntimeError(f"{action} 실패 [{msg_cd}] {msg1}")
     logger.info(
         f"해외 {'매수' if side == 'BUY' else '매도'} 주문 접수: "
         f"{body.get('PDNO')} {body.get('ORD_QTY')}주 "

@@ -15,6 +15,7 @@ import logging
 
 import config
 import db
+import market_calendar
 from kis_overseas import _ci_get, _request, request_order
 
 logger = logging.getLogger("bot")
@@ -150,11 +151,30 @@ def _num(v) -> float:
 
 
 def _check_rt_cd(result: dict, action: str) -> dict:
-    """주문 응답의 rt_cd를 확인. 0이 아니면 실패로 간주해 예외 발생."""
+    """
+    주문 응답의 rt_cd 를 확인. 0이 아니면 실패로 간주해 예외 발생.
+
+    T05: 거부 원인을 분류해 로그에 남긴다 (요구사항 4). 거부는 거부지만,
+    "장시작전/장종료" 인지 "호가 단위" 인지에 따라 다음 조치가 전혀 다르다.
+    분류에 실패해도 원문 msg_cd/msg1 은 항상 남긴다 — 문구가 바뀌면 분류만
+    놓칠 뿐 원인 추적은 가능해야 한다.
+    """
     if str(result.get("rt_cd")) != "0":
-        raise RuntimeError(
-            f"{action} 실패 [{result.get('msg_cd')}] {result.get('msg1', '').strip()}"
+        msg_cd = result.get("msg_cd")
+        msg1 = (result.get("msg1") or "").strip()
+        category = market_calendar.classify_rejection(msg_cd, msg1)
+        label = market_calendar.REJECT_LABELS.get(category, category)
+        logger.error(
+            f"❌ {action} 거부 — 분류: {label} [{msg_cd}] {msg1}"
         )
+        if category == market_calendar.REJECT_MARKET_CLOSED:
+            # 주문 구간 판정과 실제 거부가 어긋났다는 뜻이다. 캘린더·마진 설정을
+            # 확인해야 한다(임시 휴장일 누락, 시간외 주문 등).
+            logger.warning(
+                "   ↳ 장 상태 거부입니다. 주문 구간 판정(is_order_window)과 불일치 — "
+                "EXTRA_HOLIDAYS 또는 SKIP_OPEN/CLOSE_MINUTES 를 확인하세요."
+            )
+        raise RuntimeError(f"{action} 실패 [{msg_cd}] {msg1}")
     return result
 
 

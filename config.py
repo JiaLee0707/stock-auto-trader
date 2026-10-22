@@ -239,3 +239,22 @@ ORDER_PRICE_TICKS = int(os.getenv("ORDER_PRICE_TICKS", "0"))
 
 # 미체결 주문을 이 시간(분)까지 기다렸다가 취소한다. 0 이하면 자동 취소 비활성.
 ORDER_TIMEOUT_MINUTES = float(os.getenv("ORDER_TIMEOUT_MINUTES", "30"))
+
+# ── 시장 캘린더 (T05) ────────────────────────────────────
+# 정규장 판정은 `market_calendar` 가 exchange_calendars(XKRX/XNYS) 로 한다.
+# 휴장일 표를 직접 만들지 않는다 — 매년 갱신을 잊으면 휴장일에 주문을 내게 된다.
+
+# 주문 안전 마진 (분). 개장 후 이 시간이 지나야, 마감 전 이 시간 안에는 주문하지 않는다.
+# 1시간 주기 스케줄러가 개장 직후·마감 직전에 걸리는 것을 막는다.
+#   2026-10-13 15:33 KST(국내 마감 3분 전) 같은 거부가 이 값으로 걸러진다.
+# SKIP_CLOSE_MINUTES 는 **그날의 실제 마감** 기준이다 — 반일장(13:00 ET)에서는
+# 13:00 기준 10분 전(12:50 ET)부터 주문하지 않는다.
+SKIP_OPEN_MINUTES = int(os.getenv("SKIP_OPEN_MINUTES", "10"))
+SKIP_CLOSE_MINUTES = int(os.getenv("SKIP_CLOSE_MINUTES", "10"))
+
+# 라이브러리가 모르는 **임시 휴장일** 보완 목록. 시장 이름은 "KRX" / "US".
+# 예: EXTRA_HOLIDAYS={"KRX": ["2026-06-03"], "US": ["2026-11-27"]}
+# 형식은 "YYYY-MM-DD" 문자열 목록이며, 해석할 수 없는 값은 예외로 막는다
+# (오타 하나로 휴장일 차단이 무력화되면 안 된다).
+# VERIFY: 기본값은 빈 목록이다. 실제 임시 휴장일은 거래소 공지로 사람이 채워야 한다.
+EXTRA_HOLIDAYS: dict = {}

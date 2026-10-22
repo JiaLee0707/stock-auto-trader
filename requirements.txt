@@ -1,16 +1,24 @@
 # 나스닥 스노볼 자동 거래 봇 - Python 의존성
 #
 # 직접 사용하는 패키지:
-#   google-genai  : Gemini 시장 분석 (ai_analyzer.py)
-#   requests      : KIS API / 환율 조회 (kis_overseas.py)
-#   python-dotenv : .env 로드 (config.py)
-#   schedule      : 1시간 주기 매매 사이클 (main.py)
+#   google-genai       : Gemini 시장 분석 (ai_analyzer.py)
+#   requests           : KIS API / 환율 조회 (kis_overseas.py)
+#   python-dotenv      : .env 로드 (config.py)
+#   schedule           : 1시간 주기 매매 사이클 (main.py)
+#   exchange_calendars : 휴장일·정규장·서머타임 판정 (market_calendar.py, T05)
 # 나머지는 위 패키지의 전이 의존성입니다.
 #
 # 갱신 방법 (패키지 설치/제거 후):
 #   .venv/bin/python -m pip freeze > requirements.txt
 #
 # 참고: 구 SDK google-generativeai 는 사용하지 않습니다 (google.genai 로 이전 완료).
+#
+# T05: exchange_calendars 를 **버전 고정**으로 추가했습니다. 휴장일 표를 직접 만들지
+#      않기 위한 라이브러리입니다(XKRX=한국거래소, XNYS=뉴욕증권거래소 캘린더 제공).
+#      버전을 고정한 이유: 캘린더는 라이브러리 버전에 따라 휴장일 목록이 달라질 수
+#      있어, 올릴 때는 테스트(tests/test_market_calendar.py)를 다시 돌려야 합니다.
+#      pandas/numpy 는 exchange_calendars 의 필수 전이 의존성입니다(캘린더를
+#      pandas DatetimeIndex 로 다룹니다).
 
 annotated-types==0.8.0
 anyio==4.15.1
@@ -19,12 +27,15 @@ cffi==2.1.1
 charset-normalizer==3.5.2
 cryptography==50.0.2
 distro==1.9.0
+exchange_calendars==4.13.2
 google-auth==2.60.0
 google-genai==2.30.0
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.20
+numpy==2.2.6
+pandas==3.0.6
 pyasn1==0.6.4
 pyasn1_modules==0.4.2
 pycparser==3.0
