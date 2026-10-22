@@ -62,15 +62,26 @@ Python 버전: `.python-version` = `3.12.15`
 | `RSI_OVERBOUGHT` | `70` | 이상이면 매도 후보 |
 | `BB_PERIOD` | `20` | 볼린저밴드 기간 |
 | `BB_NUM_STD` | `2.0` | 볼린저밴드 표준편차 배수 |
-| `TAKE_PROFIT_THRESHOLD` | `5.0` | **구) 단일 익절 기준. 현재 매매 로직에서 사용되지 않음** |
+| `TAKE_PROFIT_PCT` | `3.0` | 목표가 익절(%). 도달 시 **전량** 매도. 0 이하면 비활성 (T06) |
+| `STOP_LOSS_PCT` | `-3.0` | 손절선(%). 0 이하면 비활성 (T06) |
+| `STOP_LOSS_ATR_MULT` | `0` | ATR 손절 배수. `0`이면 끔. 켜면 고정 %와 ATR 기반 중 **더 넓은 쪽** (T06) |
+| `ATR_PERIOD` | `14` | ATR 기간 (T06) |
+| `MAX_HOLD_TRADING_DAYS` | `7` | 보유 **거래일** 초과 시 전량 청산. 휴장일은 세지 않음 (T06) |
+| `TRAILING_STOP_ENABLED` | `false` | 트레일링 스톱 사용 여부 (T06) |
+| `TRAILING_ACTIVATE_PCT` | `2.0` | 이 수익률을 넘긴 뒤에 트레일링 활성 (T06) |
+| `TRAILING_GAP_PCT` | `1.0` | 진입 후 고점 대비 이만큼 밀리면 청산 (T06) |
+| `OVERBOUGHT_EXIT_ENABLED` | `false` | RSI≥70 AND 종가≥BB상단을 청산 사유로 쓸지 (T06) |
+| `EXIT_ORDER_TYPE_STOP_LOSS` | `market` | 사유별 청산 주문 유형 (`market`/`limit`) (T06) |
+| `EXIT_ORDER_TYPE_TIME_EXIT` | `market` | 〃 (T06) |
+| `EXIT_ORDER_TYPE_TAKE_PROFIT` | `limit` | 〃 (T06) |
+| `EXIT_ORDER_TYPE_TRAILING` | `market` | 〃 (T06) |
+| `EXIT_ORDER_TYPE_OVERBOUGHT` | `market` | 〃 (T06) |
 | `AI_SCORE_FLOOR` | `-50` | 매수 허용 최소 AI 점수 |
 | `MAX_BUYS_PER_DAY` | `2` | 종목당 하루 최대 매수 횟수 |
 | `MIN_BUY_INTERVAL_HOURS` | `2.0` | 직전 매수 후 최소 대기(시간), 2회차부터 |
-| `TAKE_PROFIT_STEPS` | `2.0:33,4.0:33,6.0:100` | 부분 익절 (`수익률%:매도비중%`) |
-| `STOP_LOSS_THRESHOLD` | `-5.0` | 손절선(%), 0 이하면 비활성 |
+| `ORDER_TYPE` | `limit` | **매수** 주문 유형 기본값. 청산은 사유별 `EXIT_ORDER_TYPE_*` 가 우선 (T04/T06) |
 | `DB_PATH` | `data/bot.db` | 상태 SQLite 경로 (T03) |
 | `RECONCILE_AUTOFIX` | `false` | 브로커↔DB 불일치 시 자동 보정 여부. 기본은 보정 없이 **매매 중단**만 (T03) |
-| `ORDER_TYPE` | `limit` | 주문 유형. `limit`(지정가)만 동작. `market`(시장가)은 미확인이라 예외 (T04) |
 | `ORDER_PRICE_TICKS` | `1` | 지정가를 현재가에서 몇 호가 옮길지. 매수 +N틱, 매도 −N틱. `0`이면 현재가 그대로 (T04) |
 | `ORDER_TIMEOUT_MINUTES` | `30` | 미체결 주문을 이 시간까지 기다렸다가 취소 (T04) |
 

@@ -441,8 +441,8 @@ def test_sell_via_submit_does_not_touch_position_on_receipt(conn, fake_refs, mon
         "해외", "QQQ", 3, profit_rate=-10.0,   # 손절 조건
         sell_fn=None,
         market="overseas", avg_price=100.0,
-        submit_sell=lambda qty: _submit(conn, lambda b, on_uncertain=None: {"rt_cd": "0"},
-                                        side="SELL", qty=qty),
+        submit_sell=lambda reason, qty: _submit(
+            conn, lambda b, on_uncertain=None: {"rt_cd": "0"}, side="SELL", qty=qty),
     )
 
     assert db.get_position(conn, "QQQ", "overseas")["qty"] == 3.0, \
@@ -458,8 +458,8 @@ def test_sell_position_is_reduced_after_fill(conn, fake_refs, monkeypatch):
     trader._check_sell(
         "해외", "QQQ", 3, profit_rate=-10.0, sell_fn=None,
         market="overseas", avg_price=100.0,
-        submit_sell=lambda qty: _submit(conn, lambda b, on_uncertain=None: {"rt_cd": "0"},
-                                        side="SELL", qty=qty),
+        submit_sell=lambda reason, qty: _submit(
+            conn, lambda b, on_uncertain=None: {"rt_cd": "0"}, side="SELL", qty=qty),
     )
     order = db.list_orders(conn)[0]
     trader._settle_order(conn, order,
@@ -487,7 +487,7 @@ def test_indicator_unavailable_holds_off_buy_but_still_allows_sell(conn, fake_re
         lambda p: f"${p}", sell_fn=None, buy_fn=None,
         fetch_closes=boom_closes, market="overseas",
         submit_buy=lambda krw: submitted.append("BUY"),
-        submit_sell=lambda qty: submitted.append(("SELL", qty)),
+        submit_sell=lambda reason, qty: submitted.append(("SELL", qty)),
         status_fn=None, cancel_fn=None,
     )
     assert ("SELL", 3.0) in submitted, "지표 조회 실패로 손절까지 막혔다"

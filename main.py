@@ -209,8 +209,9 @@ def quick_test():
     logger.info(f"  - 1회 매수 비중: 해외 {config.BUY_RATIO} / 국내 {config.DOMESTIC_BUY_RATIO}")
     logger.info(f"  - DIP 임계값: {config.DIP_THRESHOLD}")
     logger.info(f"  - 하루 최대 매수: {config.MAX_BUYS_PER_DAY}회")
-    logger.info(f"  - 부분 익절 단계: {config.TAKE_PROFIT_STEPS}")
-    logger.info(f"  - 손절선: {config.STOP_LOSS_THRESHOLD}%")
+    logger.info(f"  - 목표가 익절: +{config.TAKE_PROFIT_PCT}% (전량)")
+    logger.info(f"  - 손절선: {config.STOP_LOSS_PCT}% (ATR 배수 {config.STOP_LOSS_ATR_MULT})")
+    logger.info(f"  - 최대 보유: {config.MAX_HOLD_TRADING_DAYS}거래일")
     logger.info(f"  - AI 점수 하한: {config.AI_SCORE_FLOOR}")
 
     # 테스트: 상태 객체 확인

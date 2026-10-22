@@ -191,7 +191,6 @@ RSI_OVERSOLD           = float(os.getenv("RSI_OVERSOLD", "30"))     # 이하면 
 RSI_OVERBOUGHT         = float(os.getenv("RSI_OVERBOUGHT", "70"))   # 이상이면 매도 후보
 BB_PERIOD              = int(os.getenv("BB_PERIOD", "20"))
 BB_NUM_STD             = float(os.getenv("BB_NUM_STD", "2.0"))
-TAKE_PROFIT_THRESHOLD  = float(os.getenv("TAKE_PROFIT_THRESHOLD", "5.0"))
 AI_SCORE_FLOOR         = int(os.getenv("AI_SCORE_FLOOR", "-50"))
 
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
@@ -199,16 +198,59 @@ AI_SCORE_FLOOR         = int(os.getenv("AI_SCORE_FLOOR", "-50"))
 MAX_BUYS_PER_DAY       = int(os.getenv("MAX_BUYS_PER_DAY", "2"))
 MIN_BUY_INTERVAL_HOURS = float(os.getenv("MIN_BUY_INTERVAL_HOURS", "2.0"))
 
-# 부분 익절: (수익률 %, 매도 비중 %) 단계. 마지막 단계는 남은 수량 전량 매도.
-# 예: (2.0, 33) → +2% 도달 시 보유의 약 1/3 매도
-TAKE_PROFIT_STEPS = [
-    tuple(float(v) for v in item.split(":"))
-    for item in os.getenv("TAKE_PROFIT_STEPS", "2.0:33,4.0:33,6.0:100").split(",")
-    if item.strip()
-]
+# ── 청산 규칙 (T06: 부분 익절 폐기, 단순 규칙으로 대체) ───
+# 판단은 `trader.evaluate_exit()` 순수 함수가 한다. I/O 를 하지 않으므로 테스트 가능하다.
+# 청산은 **전량**이다 — 소액(1~4주)에서 분할은 `max(1, …)` 때문에 1주가 되어
+# 비중이 사실상 무의미했다(CLAUDE.md "현재 알려진 문제"). 부분 익절은 없앴다.
+#
+# **아래 수치는 모두 검증 전 가설이다** (T11 백테스트로 확정). 근거 없이 조정하지 말 것.
 
-# 손절: 수익률이 이 값 이하로 떨어지면 전량 매도 (0 이하 = 비활성)
-STOP_LOSS_THRESHOLD    = float(os.getenv("STOP_LOSS_THRESHOLD", "-5.0"))
+# 목표가 도달 시 전량 익절. 0 이하면 비활성.
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0"))
+
+# 손절: 이 값 이하면 전량 매도. 0 이하면 비활성.
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "-3.0"))
+
+# ATR 기반 손절. `STOP_LOSS_ATR_MULT` 가 0 이면 끔(고정 % 만 사용).
+# 켜면 **고정 %와 ATR 기반 중 더 넓은 쪽**을 쓴다 — 변동성이 크면 손절 폭을 넓혀
+# 정상적인 흔들림에 손절당하는 것을 줄인다.
+# ATR 손절선(%) = -(ATR / 진입가) × 100 × 배수. ATR 을 모르면 고정 % 만 쓴다.
+STOP_LOSS_ATR_MULT = float(os.getenv("STOP_LOSS_ATR_MULT", "0"))
+ATR_PERIOD         = int(os.getenv("ATR_PERIOD", "14"))
+
+# 보유 거래일 초과 시 전량 청산. 0 이하면 비활성.
+# 거래일 계산은 `market_calendar.trading_days_between`(T05)을 쓴다 — 휴장일을 세지 않는다.
+MAX_HOLD_TRADING_DAYS = int(os.getenv("MAX_HOLD_TRADING_DAYS", "7"))
+
+# 트레일링 스톱. 진입 후 고점(peak_price_since_entry) 대비 `TRAILING_GAP_PCT` 만큼
+# 밀리면 전량 청산한다. 수익이 `TRAILING_ACTIVATE_PCT` 를 넘은 뒤에만 켜진다.
+# 고점 갱신은 사이클마다 하고, 갱신에 실패해도 매도 판단은 계속한다.
+TRAILING_STOP_ENABLED = os.getenv("TRAILING_STOP_ENABLED", "false").strip().lower() == "true"
+TRAILING_ACTIVATE_PCT = float(os.getenv("TRAILING_ACTIVATE_PCT", "2.0"))
+TRAILING_GAP_PCT      = float(os.getenv("TRAILING_GAP_PCT", "1.0"))
+
+# 과매수 청산(RSI ≥ RSI_OVERBOUGHT AND 종가 ≥ BB 상단). T05 까지 기본 동작이었으나
+# T06 에서 **기본 꺼짐**으로 내렸다 — 검증되지 않은 신호이고, 목표가·손절과
+# 겹치면 "왜 팔렸는지"가 흐려진다. 켜려면 명시적으로 설정한다.
+OVERBOUGHT_EXIT_ENABLED = os.getenv("OVERBOUGHT_EXIT_ENABLED", "false").strip().lower() == "true"
+
+# ── 청산 주문 유형 (T06) ─────────────────────────────────
+# 중요: `cancel_order` 가 아직 미구현(T04b)이라 **체결되지 않은 매도 주문을 취소할 수 없다.**
+# 그래서 손절·시간청산은 반드시 체결되어야 하는 주문이므로 **시장가**로 낸다.
+# 지정가로 내면 가격이 안 맞아 미체결로 남고, 취소도 못 해 포지션이 그대로 남는다.
+#
+# 목표가 익절은 지정가를 허용한다 — 목표가에 닿았을 때만 체결되면 되고,
+# 미체결로 남아도 손실이 아니라 기회비용이다. 다만 미체결 주문은 그 종목의
+# 신규 주문을 막으므로(`ORDER_TIMEOUT_MINUTES` 초과 시 취소 시도 → 실패 시 차단)
+# 사람이 확인해야 한다.
+#
+# 값은 `kis_domestic` 의 ORD_DVSN: "00" 지정가 / "01" 시장가 (docs/kis_api_fields.md §1).
+EXIT_ORDER_TYPE_STOP_LOSS = os.getenv("EXIT_ORDER_TYPE_STOP_LOSS", "market").strip().lower()
+EXIT_ORDER_TYPE_TIME_EXIT = os.getenv("EXIT_ORDER_TYPE_TIME_EXIT", "market").strip().lower()
+EXIT_ORDER_TYPE_TAKE_PROFIT = os.getenv("EXIT_ORDER_TYPE_TAKE_PROFIT", "limit").strip().lower()
+# 트레일링·과매수 청산도 체결이 우선이다(추세가 꺾였다는 판단이므로).
+EXIT_ORDER_TYPE_TRAILING = os.getenv("EXIT_ORDER_TYPE_TRAILING", "market").strip().lower()
+EXIT_ORDER_TYPE_OVERBOUGHT = os.getenv("EXIT_ORDER_TYPE_OVERBOUGHT", "market").strip().lower()
 
 # 모의/실전 토큰 캐시 충돌 방지
 TOKEN_CACHE_FILE = "token_cache_mock.json" if IS_MOCK else "token_cache_real.json"

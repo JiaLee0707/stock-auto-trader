@@ -1659,3 +1659,237 @@ T04 의 `_require_settlement_support()` 는 **"구현됐는지"를 알려고 함
 - **보유 기간 제한이 아직 없다.** `trading_days_between` 을 연결하는 것은 T11 이다.
 - `main.py` 는 이번 Task 에서도 **한 번도 실행하지 않았다.** 실제 모의투자 1회
   실행으로 `EXTRA_HOLIDAYS`·마진·거부 분류를 확인하는 것이 다음 단계다.
+
+---
+
+# T06 — 청산 로직 단순화 (부분 익절 폐기) (2026-10-22)
+
+## 1. 완료 여부
+
+**완료.** 요구사항 1~9 와 완료 기준(경계값 테스트, 부분 익절 코드·설정 전부 제거)을
+모두 충족했다. 단 아래 **3항의 미확인 항목**(ATR 입력 경로, 해외 시장가)은 남아 있다.
+
+| # | 요구사항 | 상태 |
+|---|---|---|
+| 1 | `TAKE_PROFIT_STEPS`·분할 매도·`max(1,…)`·`profit_stage` 삭제 | **완료** |
+| 2 | 순수 함수 `evaluate_exit` + 설정값 8종(목표가·손절·ATR·보유일·트레일링·과매수) | **완료**(ATR 입력은 미배선 — 3항 1번) |
+| 3 | 우선순위 손절 > 시간청산 > 목표가 > 트레일링 > 과매수, 사유 1개 | **완료** |
+| 4 | 사유 문자열을 `orders.reason` 과 로그에 기록 | **완료** |
+| 5 | 전량 청산 수량을 **브로커 잔고**로 재확인, 불일치 시 주문 안 하고 경고 | **완료** |
+| 6 | 갭 하락 미체결 가능성 문서화, 손절·시간청산 체결 우선(주문 유형 설정 노출) | **부분** — 국내는 완료, **해외는 시장가 미구현**(3항 2번) |
+| 7 | T05 안전 마진 안에서만 청산 주문, 마감 직전 손절 지연 보고 | **완료** → 결정 질문 1번 |
+| 8 | 새 기본값은 설정값으로, CLAUDE.md 전략 표 갱신 | **완료** |
+| 9 | 변경 전 동작 특성화 테스트 → 변경 후 차이 목록 | **완료**(4항) |
+| 완료 기준 | 경계값·갭·우선순위 충돌·트레일링 전후·ATR on/off 테스트 | **완료** (`tests/test_exit_rules.py`, 65건) |
+| 완료 기준 | 부분 익절 코드·설정 완전 제거 (grep 검증) | **완료**(5항) |
+
+브랜치: `improve/t06-exit`. 커밋하지 않았다.
+`main.py` 는 실행하지 않았고 실제 모의 API 도 호출하지 않았다. 새 패키지도 설치하지 않았다.
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 |
+|---|---|
+| `exit_rules.py` | **신규.** 순수 함수만. `evaluate_exit(position, bar_info, params, now) -> ExitSignal\|None`, `trading_days_held`, `atr_stop_loss_pct`, `effective_stop_loss_pct`, `params_from_config`. 사유 상수(`STOP_LOSS`/`TIME_EXIT`/`TAKE_PROFIT`/`TRAILING`/`OVERBOUGHT`)와 `PRIORITY`/`LABELS`. **I/O 없음** |
+| `config.py` | `TAKE_PROFIT_STEPS`·`TAKE_PROFIT_THRESHOLD` 삭제. `TAKE_PROFIT_PCT=3.0`, `STOP_LOSS_PCT=-3.0`, `STOP_LOSS_ATR_MULT=0`, `ATR_PERIOD=14`, `MAX_HOLD_TRADING_DAYS=7`, `TRAILING_STOP_ENABLED=false`/`TRAILING_ACTIVATE_PCT=2.0`/`TRAILING_GAP_PCT=1.0`, `OVERBOUGHT_EXIT_ENABLED=false`, `EXIT_ORDER_TYPE_*` 5종 신규 |
+| `trader.py` | `_check_sell` 을 **판단(순수 함수) / I/O(주문) 로 분리**. `_exit_order_type(reason)`, `_confirm_sell_quantity`+`_trigger_reconcile_check`(요구사항 5), `_refresh_peak`(요구사항 2) 신규. `submit_sell` 시그니처가 `(qty)` → **`(reason, qty)`** 로 변경. `_submit_order`/`_record_order_pending` 에 `reason` 추가. 부분 익절 루프 삭제 |
+| `kis_domestic.py` | `order_body(..., order_type=None)` / `_order_dvsn(order_type)` / `_order_price(..., order_type)` — **주문 단위로 유형 덮어쓰기**(T06 핵심). `_resolve_order_type` 신규 |
+| `kis_overseas.py` | `order_body(..., order_type=None)` — `market` 은 **`NotImplementedError`**(3항 2번) |
+| `state.py` | `profit_stage`/`set_profit_stage` 와 `_profit_stages` 삭제 |
+| `db.py` | `config_hash()` 에서 삭제된 설정(`take_profit_steps`/`stop_loss_threshold`) 제거, 새 청산 설정으로 교체. `positions.entry_signal_json` 에 "T06 부터 미사용" 주석(열은 유지) |
+| `main.py` | `quick_test()` 가 삭제된 설정을 읽어 **죽는 상태**였다 — 새 설정 출력으로 교체 |
+| `README.md` | 환경 변수 표에서 삭제된 3종 제거, T06 신규 13종 추가 |
+| `CLAUDE.md` | 전략 기본값 표를 "T06에서 코드에 반영됨, T11 결과로 확정"으로 갱신 + 청산 규칙 요약 |
+| `tests/test_exit_rules.py` | **신규** (65건). 아래 4·5항 참고 |
+| `tests/test_exit_characterization.py` | **삭제** — 변경 전 동작을 고정한 기준선이므로 새 동작과 양립할 수 없다 |
+| `tests/test_state.py`, `tests/test_order_safety.py` | 삭제된 API·변경된 `submit_sell` 시그니처에 맞춰 수정 |
+
+## 3. 확인하지 못한 항목 (`# VERIFY` 목록)
+
+1. **ATR 입력 경로가 배선되지 않았다.** `evaluate_exit` 는 `bar_info["atr"]` 을 받지만,
+   `trader` 가 그것을 채우지 않는다(`bar_info = {"atr": None, ...}`). 이유:
+   `indicators.atr()` 은 **고가·저가 시계열**이 필요한데 저장소에는 종가만 있다 —
+   `kis_*_daily_closes` 는 종가만 반환하고, `history.kis_rows_to_bars()` 는 KIS 일봉
+   응답의 날짜/시가/고가/저가 키가 확인되지 않아 `NotImplementedError` 다(T02 보고).
+   즉 **ATR 을 계산할 입력 자체가 없다.** `STOP_LOSS_ATR_MULT` 기본값이 0(꺼짐)이라
+   현재 동작에는 영향이 없다. 0 이 아닌 값을 설정하면 고정 % 만 쓰이고 매 사이클
+   경고가 남는다(설정을 켰는데 동작이 다르다는 것을 모르면 안 되므로).
+   **고가·저가 필드명을 공식 문서에서 확인하면 배선할 것.**
+2. **해외 시장가 주문이 미구현이다.** `docs/kis_api_fields.md` 는 해외주식 주문 API 를
+   "이 파일에 없는 것 (추측 금지)" 목록에 **명시**하고 있다. 해외 `ORD_DVSN` 코드표와
+   시장가일 때의 `OVRS_ORD_UNPR` 규칙을 확인할 수 없어 추측하지 않았다(절대 규칙 4).
+   결과: 해외 청산은 사유와 무관하게 **지정가**로 나간다. `config.EXIT_ORDER_TYPE_*` 이
+   `market` 이어도 해외는 지정가다. 지정가가 미체결이면 `ORDER_TIMEOUT_MINUTES` 초과 시
+   취소를 시도하고, 취소도 실패하면(`cancel_order` 미구현) 그 종목의 **신규 매수만**
+   차단된다(`_halt_due_to_unfilled`). **해외 시장가는 갭 하락 손절에서 가장 위험한
+   부분이다** — 결정 질문 2번 참고.
+3. **`_refresh_peak` 의 저장 방식이 `upsert_position` 전체 덮어쓰기다.** 고점 한 값을
+   갱신하려고 `qty`/`avg_price`/`entry_time`/`entry_signal` 을 함께 다시 쓴다. 같은
+   사이클 안에서는 값이 방금 읽은 그대로라 안전하지만, **동시에 다른 경로가 포지션을
+   바꾸면 덮어쓴다**(봇은 단일 프로세스·단일 스레드라 현재는 발생하지 않는다).
+   전용 `update_peak_price()` 를 만드는 편이 안전하다 — 범위 밖이라 하지 않았다.
+4. **브로커 잔고 재확인(요구사항 5)이 실전에서 실제로 도는지.** 단위 테스트는 주입한
+   콜러블로만 검증했다. 실제 `kis.get_balance()` / `kd.get_domestic_balance()` 를
+   청산 직전에 **한 번 더** 부르므로 API 호출이 1회 늘어난다. 모의 서버 호출 한도와
+   지연은 미확인(이번 Task 는 API 를 호출하지 않았다).
+5. **부동소수점 경계 처리(`_EPS_PCT = 1e-9`).** 가격이 소수 2자리 실수라
+   `고점 102.00 / 현재 100.98` 의 하락률이 이론상 정확히 -1.00% 인데 실제 계산값은
+   `-0.999999999999996` 이다. 허용치가 없으면 "임계값에 닿았는데 발동하지 않는다".
+   1e-9 는 가격 표현 오차(1e-13 수준)보다 크고 실제 판단 크기(1e-2)보다 훨씬 작지만,
+   **이 값의 적절성은 검증되지 않았다.**
+6. **`exit_rules` 가 청산 주문 유형이 `limit`/`market` 이외 값일 때 시장가로 되돌린다.**
+   체결이 우선인 청산에서 안전한 쪽이라고 판단했지만, 설정 오타를 조용히 넘기는
+   것과 같다는 반론이 가능하다(CRITICAL 로 크게 남기고는 있다). 결정 질문 4번.
+7. **`entry_signal_json` 이 이제 미사용이다.** 새 포지션은 NULL 로 저장된다.
+   열을 지우지 않은 것은 요청대로이며(이력 보존), 기존 값도 그대로 남아 있다.
+   삭제 여부는 사용자 결정.
+8. **시간청산의 "거래일" 정의.** `trading_days_between` 은 진입일을 포함하고
+   기준일을 제외한다. 즉 진입 당일 저녁에 "1거래일 보유"가 된다. 이 정의가
+   `MAX_HOLD_TRADING_DAYS=7` 의 의도와 맞는지는 **검증되지 않았다**(T11).
+
+## 4. 변경 전후 달라진 동작 (특성화 테스트가 고정했던 것 → 지금)
+
+`tests/test_exit_characterization.py` 를 먼저 작성해 T05 까지의 동작을 고정한 뒤,
+변경하고 삭제했다. 무엇이 달라졌는지는 다음과 같다.
+
+| # | 변경 전 (T05) | 변경 후 (T06) |
+|---|---|---|
+| 1 | 손절선 `STOP_LOSS_THRESHOLD = -5.0` | `STOP_LOSS_PCT = -3.0` |
+| 2 | 익절이 **3단계 부분 매도**(2%:33, 4%:33, 6%:100) | **+3% 단일, 전량 청산** |
+| 3 | 보유 1주에서 `max(1, round(1×0.33))`=1 → **첫 단계에서 전량 청산**(결함) | 분할이 없으므로 결함 자체가 사라짐 |
+| 4 | 보유 30주 +6.5% → `[10, 7, 13]` 연쇄 계산 매도 | `[30]` 전량 |
+| 5 | 같은 단계는 당일 재실행 안 함(`profit_stage` 메모리 기억) | 단계 개념 없음. 대신 **포지션·진입시각만** 보고 판단 |
+| 6 | 전량 청산 시에만 `set_bought_today(False)` | 청산이 항상 전량이므로 항상 재진입 허용 |
+| 7 | 과매수(RSI≥70 AND BB상단)가 **수익 중이면 익절 트리거**(기본 동작) | `OVERBOUGHT_EXIT_ENABLED=false` 로 **기본 꺼짐**. 켜면 청산 사유 중 **최하위** |
+| 8 | 보유 기간 제한 **없음** | `MAX_HOLD_TRADING_DAYS=7` (거래일, 휴장일 제외) |
+| 9 | 트레일링 스톱 **없음** | `TRAILING_STOP_ENABLED` (기본 꺼짐). 켜면 고점 갱신 + 활성선/이탈선 |
+| 10 | 청산 판단이 `_check_sell` 안에 I/O 와 섞여 있음 | `exit_rules.evaluate_exit` **순수 함수**로 분리 |
+| 11 | 청산 주문 `orders.reason` 이 **NULL** | `STOP_LOSS`/`TIME_EXIT`/`TAKE_PROFIT`/`TRAILING`/`OVERBOUGHT` 기록 |
+| 12 | 매도 수량이 **브로커 잔고**에서 온 값을 그대로 사용 | 주문 직전 **잔고 재조회**로 재확인, 불일치 시 주문 보류·축소 (요구사항 5) |
+| 13 | 매도 주문 유형이 전역 `ORDER_TYPE` 하나 | 사유별 `EXIT_ORDER_TYPE_*` (**국내만 실제로 시장가 가능**, 3항 2번) |
+| 14 | 손절 시 지표 조회 실패해도 수익률 기준으로 매도 | 동일 (테스트로 고정: `test_indicator_unavailable_holds_off_buy_but_still_allows_sell`) |
+
+**의도적으로 바꾸지 않은 것**: RSI·볼린저 매수 조건, AI 점수 필터, 매수 비중,
+`MAX_BUYS_PER_DAY`, 지정가 매수 경로, T05 의 안전 마진, `cancel_order` 미구현 상태.
+
+## 5. 부분 익절 제거 — grep 결과
+
+```
+$ grep -rn "TAKE_PROFIT_STEPS\|TAKE_PROFIT_THRESHOLD\|STOP_LOSS_THRESHOLD\|profit_stage" \
+    --include='*.py' --include='*.md' --include='*.yaml' . | grep -v '/.venv/'
+```
+
+남은 것은 **전부** 이력·테스트이며, 실행 경로(`config`/`trader`/`state`/`main`/`db`)에는 없다.
+
+| 위치 | 내용 | 성격 |
+|---|---|---|
+| `state.py:9` | "T06: 부분 익절 단계를 삭제했다" | 이력 주석 |
+| `CLAUDE.md:53` | `utils.py` 가 낡은 이름을 보유한다는 **기존** 경고 | 사실(미사용 파일) |
+| `docs/DEVELOPMENT.md:93` | 〃 | 사실(미사용 파일) |
+| `docs/archive/*` | 개정 전 문서 | 보관 문서 |
+| `docs/CHANGES.md` | 과거 T01~T05 보고서 | 이력 |
+| `tests/test_exit_rules.py` | **없다는 것을 검증**하는 테스트 | 신규 |
+| `tests/test_state.py` | 〃 | 수정 |
+
+코드에서 사라진 것: `config.TAKE_PROFIT_STEPS`, `config.TAKE_PROFIT_THRESHOLD`,
+`config.STOP_LOSS_THRESHOLD`, `state.BotState.profit_stage`, `state.BotState.set_profit_stage`,
+`state.BotState._profit_stages`, `trader._check_sell` 의 부분 익절 루프(`stage`/`remaining`/
+`sold_any`/`block_pct`/`indicator_sell`), `max(1, …)` 수량 계산.
+`tests/test_exit_rules.py::test_trader_has_no_partial_sell_code` 가
+`trader` 소스에 이 식별자들이 없음을 **테스트로** 고정한다(다음 Task 가 되살리면 실패한다).
+
+DB 스키마는 **열을 지우지 않았다.** `positions.entry_signal_json` 에 "T06 부터 미사용"이라는
+주석만 달았다(요청대로). `orders.reason` 은 원래 있던 열을 이제 쓴다.
+
+## 6. T05 안전 마진과 청산 주문 (요구사항 7)
+
+**청산 주문도 T05 의 주문 구간 안에서만 나간다.** `main.market_windows()` 가
+`is_order_window` 로 판정한 `orderable` 값이 `False` 면 `trader.run_trading_cycle` 이
+호출되지 않고, API 호출 없이 스킵된다. 즉 청산 판단 자체가 그 구간 밖에서는 일어나지 않는다.
+
+**마감 직전 손절이 다음 개장까지 지연되는 경우가 실제로 있다:**
+
+- 국내: 마감 15:30 KST, `SKIP_CLOSE_MINUTES=10` → **15:20 이후에는 청산 주문이 나가지 않는다.**
+  15:20~15:30 사이에 -3% 를 뚫으면 다음 거래일 09:10(개장 +10분)까지 기다린다.
+- 미국: 마감 16:00 ET(반일장 13:00 ET), 같은 규칙 → **15:50 ET 이후**가 그 구간이다.
+  금요일 마감 직후라면 다음 개장은 월요일이므로 **최대 약 3일** 지연될 수 있다.
+- 스케줄러가 1시간 주기라 실제로는 "마감 10분 전 ~ 마감"에 사이클이 걸릴 때만 발생한다.
+
+**지연을 줄이는 선택지** (결정 질문 1번):
+  (a) 지금대로 둔다 — 마감 직전 주문은 미체결·거부 위험이 커서 피하는 것이 낫다는 판단.
+  (b) 마감 직전 **손절만** 마진을 줄인다(예: `SKIP_CLOSE_MINUTES` 를 손절에는 3분 적용).
+      손절은 갭 리스크가 크므로 체결 가능성을 우선한다는 논리.
+  (c) 마감 직전에는 청산을 아예 하지 않되 **다음 개장 시가에 즉시** 내도록 별도 표시를 남긴다.
+지금은 (a) 이며, 마진 값은 `config.SKIP_CLOSE_MINUTES` 하나로 조정할 수 있다.
+
+**갭 하락 주의(요구사항 6)**: 손절 판단은 "손절선을 넘었다"일 뿐 **그 가격에 체결된다는
+보장이 없다.** 갭으로 시가가 손절선 아래에서 시작하면 그 가격에는 팔리지 않는다.
+손절·시간청산을 시장가로 두는 이유가 이것이며, 국내에서는 실제로 시장가로 나간다
+(해외는 3항 2번).
+
+## 7. 테스트 결과
+
+```
+$ .venv/bin/python -m pytest -q
+465 passed in 15.50s
+```
+
+`tests/test_exit_rules.py` 신규 **65건**. 완료 기준별 대응:
+
+| 완료 기준 | 테스트 |
+|---|---|
+| 임계값 **정확히** | `test_stop_loss_triggers_exactly_at_threshold`, `test_stop_loss_does_not_trigger_just_above_threshold`, `test_take_profit_triggers_exactly_at_threshold`, `test_take_profit_does_not_trigger_just_below_threshold` |
+| 갭이 임계값 초과 | `test_stop_loss_triggers_on_gap_down_far_below_threshold`, `test_take_profit_triggers_on_gap_up` |
+| 우선순위 충돌(손절+시간청산 동시) | `test_stop_loss_beats_time_exit`, `test_stop_loss_beats_take_profit_is_impossible_but_priority_is_total`, `test_trailing_loses_to_take_profit`, `test_overbought_loses_to_trailing`, `test_only_one_signal_is_returned_per_cycle` |
+| 트레일링 활성 전/후 | `test_trailing_not_active_before_threshold`, `test_trailing_activates_exactly_at_threshold_and_gap`, `test_trailing_does_not_trigger_before_gap_is_hit`, `test_trailing_ignored_without_peak`, `test_trailing_disabled_by_default_does_not_trigger` |
+| ATR 옵션 on/off | `test_atr_option_off_uses_fixed_percent`, `test_atr_option_picks_wider_of_two`, `test_atr_option_keeps_fixed_when_atr_is_narrower`, `test_atr_option_with_missing_atr_falls_back_to_fixed`, `test_atr_stop_loss_changes_widening_threshold_in_evaluate` |
+| 순수 함수(요구사항: I/O 금지) | `test_evaluate_exit_does_no_io` (DB·API·상태를 모두 막고 판단이 서는지) |
+| 요구사항 5 (브로커 수량 재확인) | `test_broker_quantity_smaller_reduces_order`, `test_broker_quantity_larger_sells_only_db_quantity`, `test_broker_zero_quantity_blocks_order`, `test_balance_recheck_failure_blocks_order` |
+| 요구사항 2 (주문별 유형 덮어쓰기) | `test_order_type_argument_overrides_global_setting`, `test_exit_order_type_by_reason`, `test_overseas_market_order_is_not_implemented` |
+| 부분 익절 제거 | `test_partial_profit_settings_are_gone`, `test_profit_stage_api_is_gone`, `test_trader_has_no_partial_sell_code` |
+| 기존 가드 유지 | `test_external_position_is_never_sold`(T03 EXTERNAL), `test_indicator_unavailable_holds_off_buy_but_still_allows_sell`(기존) |
+
+기존 테스트는 3건을 수정했다(동작 변경에 따른 것이며 완화가 아니다):
+`tests/test_state.py` 의 `profit_stage` 4건 → "삭제됐다"를 검증하는 2건,
+`tests/test_order_safety.py` 의 `submit_sell` 람다 3곳 → 인자 2개.
+
+## 8. 사용자가 결정해야 할 질문
+
+1. **마감 직전 손절 지연(6항)을 완화할까요?** (a) 지금대로 / (b) 손절만 마진 축소 /
+   (c) 다음 개장 즉시 청산 표시. 기본은 (a) 입니다.
+2. **해외 시장가 주문을 위해 공식 문서를 확인해 줄 수 있나요?** (3항 2번) 해외주식
+   주문 API 의 `ORD_DVSN` 코드표와 시장가 시 `OVRS_ORD_UNPR` 규칙이 필요합니다.
+   확인 전까지 **해외 손절은 지정가**라 갭 하락에서 미체결로 남을 수 있습니다.
+   임시 대안: 해외는 `IS_OVERSEAS_ENABLED=false` 로 두고 국내만 운용.
+3. **ATR 손절을 쓸 계획인가요?** (3항 1번) 쓰려면 고가·저가 데이터 확보가 먼저입니다
+   (공식 문서의 일봉 필드명 확인 또는 CSV 직접 입력). 지금은 설정해도 동작하지 않습니다.
+4. **잘못된 `EXIT_ORDER_TYPE_*` 값을 어떻게 처리할까요?** 지금은 CRITICAL 로그 후
+   시장가로 진행합니다(5항 6번). 예외로 시작을 막는 편이 나을 수도 있습니다.
+5. **`_EPS_PCT`(1e-9) 를 그대로 둘까요?** (3항 5번) 더 키우면(예: 1e-6) 부동소수점
+   문제는 확실히 사라지지만 실제 임계값이 미세하게 움직입니다.
+6. **`entry_signal_json` 을 삭제할까요?** (3항 7번) 이제 쓰지 않습니다.
+7. **`state.py` 의 `_refresh_peak` 저장 방식을 전용 함수로 바꿀까요?** (3항 3번)
+
+## 9. 다음 Task에 영향을 주는 사항
+
+- **청산 판단은 `exit_rules.evaluate_exit` 하나다.** 새 청산 규칙을 추가하려면 여기에
+  사유 상수 + `PRIORITY` + `LABELS` 를 함께 늘린다. `PRIORITY` 에 없는 사유는
+  `ExitSignal` 생성 시 예외가 난다(오타가 조용히 새 사유가 되지 않는다).
+- **`submit_sell` 시그니처가 `(qty)` → `(reason, qty)` 로 바뀌었다.** 매도 주문을 내는
+  새 코드는 사유를 함께 넘겨야 한다. `orders.reason` 이 그 값으로 채워진다.
+- **`kis_domestic.order_body(..., order_type=None)` / `kis_overseas.order_body(..., order_type=None)`.**
+  `None` 이면 전역 `config.ORDER_TYPE` 을 쓴다(하위 호환). 해외에 `market` 을 넘기면
+  `NotImplementedError` 다.
+- **`config.ORDER_TYPE` 은 이제 "매수 주문 유형"의 의미가 강하다.** 청산은
+  `config.EXIT_ORDER_TYPE_*` 가 우선한다. T09 이후 청산 규칙을 손볼 때 두 설정을
+  혼동하지 말 것.
+- **T11(백테스트)에서 확인할 것**: (a) `_EPS_PCT`, (b) 시간청산의 "거래일" 정의(3항 8번),
+  (c) ATR 손절을 켤지, (d) 트레일링·과매수 청산을 켤지. 네 가지 모두 **검증 전 가설**이다.
+- **`_refresh_peak` 는 `positions` 전체를 덮어쓴다.** 동시성 있는 코드를 넣기 전에
+  전용 갱신 함수로 바꿔야 한다(3항 3번).
+- **미체결 매도 주문이 남으면 그 종목의 신규 매수만 차단된다**(`_halt_due_to_unfilled`).
+  청산은 시장가가 기본이라 이 상황이 줄어들지만, 목표가 익절이 지정가인 국내에서는
+  여전히 발생할 수 있다. `cancel_order` 미구현(T04b)이 남아 있는 한 이 위험은 남는다.
+- **`main.py` 는 이번 Task 에서도 실행하지 않았다.** 실제 모의투자 1회 실행으로
+  `orders.reason` 이 채워지는지, 브로커 재조회가 정상인지, 시장가 청산이 체결되는지
+  확인하는 것이 다음 단계다.

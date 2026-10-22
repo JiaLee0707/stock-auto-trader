@@ -37,7 +37,6 @@ def db_path(tmp_path):
 def test_initially_not_bought(st):
     assert st.bought_today_for("QQQ") is False
     assert st.buy_count_today("QQQ") == 0
-    assert st.profit_stage("QQQ") == 0
     assert st.last_buy_time("QQQ") is None
 
 
@@ -77,11 +76,10 @@ def test_tickers_are_independent(st):
     assert st.bought_today_for("379800") is False
 
 
-def test_profit_stage_roundtrip(st):
-    st.set_profit_stage("QQQ", 2)
-    assert st.profit_stage("QQQ") == 2
-    st.set_profit_stage("QQQ", 0)
-    assert st.profit_stage("QQQ") == 0
+def test_profit_stage_is_gone(st):
+    """T06: 부분 익절 단계 API 는 삭제됐다 (`tests/test_state.py` 상단 설명 참고)."""
+    assert not hasattr(st, "profit_stage")
+    assert not hasattr(st, "set_profit_stage")
 
 
 def test_last_buy_time_is_tz_aware_kst(st):
@@ -125,18 +123,18 @@ def test_buy_count_survives_new_instance(db_path):
     c2.close()
 
 
-def test_profit_stage_resets_on_restart(db_path):
+def test_profit_stage_api_is_removed(db_path):
     """
-    익절 단계는 당일 도달 단계라 재시작하면 0으로 돌아간다(의도).
-    재시작 후에는 브로커 잔고 기준으로 다시 판단한다.
+    T06: 부분 익절 단계(`profit_stage`)를 **삭제**했다.
+
+    청산이 전량이고 판단이 `positions` 만 보므로 "오늘 몇 단계까지 팔았나"를
+    기억할 필요가 없다. 남아 있으면 다시 쓰이므로 없다는 것을 고정한다.
     """
     c1 = db.open_db(db_path)
-    state.BotState(c1).set_profit_stage("QQQ", 2)
+    st = state.BotState(c1)
+    assert not hasattr(st, "profit_stage")
+    assert not hasattr(st, "set_profit_stage")
     c1.close()
-
-    c2 = db.open_db(db_path)
-    assert state.BotState(c2).profit_stage("QQQ") == 0
-    c2.close()
 
 
 # ── 날짜 경계 (완료 기준 3) ───────────────────────────────
@@ -235,8 +233,7 @@ def test_bot_state_proxy_forwards_to_singleton(db_path):
     try:
         state.bot_state.record_buy("QQQ")
         assert state.bot_state.buy_count_today("QQQ") == 1
-        state.bot_state.set_profit_stage("QQQ", 3)
-        assert state.bot_state.profit_stage("QQQ") == 3
+        assert state.bot_state.bought_today_for("QQQ") is True
     finally:
         state._bot_state = None
         c.close()

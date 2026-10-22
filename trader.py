@@ -11,12 +11,13 @@
   3. 당일 매수 횟수 < MAX_BUYS_PER_DAY              →  분할 매수 상한
   4. 직전 매수 후 MIN_BUY_INTERVAL_HOURS 경과        →  매수 소진 방지
 
-매도 조건 (우선순위 순):
-  1. 손절: 수익률 <= STOP_LOSS_THRESHOLD            →  전량 매도
-  2. 부분 익절: 아래 둘 중 하나라도 해당하면 다음 단계 실행 (수익 중일 때만)
-     - 수익률이 TAKE_PROFIT_STEPS 단계 도달
-     - 지표 과매수: RSI >= RSI_OVERBOUGHT(70) 이고 종가 >= 볼린저 상단
-     단계는 당일 1회씩만 실행하고, 수익률이 떨어져도 재실행하지 않는다.
+매도 조건 (T06: 부분 익절 폐기 — 청산은 **전량**, 사유는 **하나**)
+  판단은 `exit_rules.evaluate_exit()` **순수 함수**가 한다(I/O 없음).
+  우선순위: 손절 > 시간청산 > 목표가 > 트레일링 > 과매수.
+  여기(`trader`)는 I/O 만 담당한다 — 포지션 조회, 브로커 수량 재확인, 주문.
+
+  T06 이전에는 부분 익절(2/4/6% 단계별 분할)이었고, 소액(1~4주)에서 최소 수량
+  보정 때문에 첫 단계에 전량이 나가는 결함이 있었다(CLAUDE.md 참고).
 """
 import json
 import logging
@@ -26,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 import config
 import db
+import exit_rules
 import indicators
 import kis_domestic as kd
 import kis_overseas as kis
@@ -49,6 +51,40 @@ def _state_conn():
 def _order_type_label() -> str:
     """`orders.order_type` 에 남길 주문 유형 문자열(설정값 그대로)."""
     return "MARKET" if config.ORDER_TYPE == "market" else "LIMIT"
+
+
+def _refresh_peak(conn, ticker: str, market: str, price: float) -> float | None:
+    """
+    진입 후 고점(`positions.peak_price_since_entry`)을 현재가로 갱신한다 (T06, 요구사항 2).
+
+    트레일링 스톱이 쓰는 값이다. 고점은 **내려가지 않는다** — 매 사이클 현재가로
+    덮어쓰면 고점이 아니라 그냥 현재가가 되어 트레일링이 동작하지 않는다.
+
+    포지션이 없거나(청산됨) 상태를 못 읽으면 아무것도 하지 않고 None 을 돌려준다.
+    고점을 갱신하지 못해도 청산 판단은 계속된다(가격 기반 규칙이 우선).
+    """
+    pos = db.get_position(conn, ticker, market)
+    if not pos or pos.get("status") != "OPEN":
+        return None
+
+    prev = pos.get("peak_price_since_entry")
+    try:
+        prev_val = float(prev) if prev is not None else None
+    except (TypeError, ValueError):
+        prev_val = None
+    peak = price if prev_val is None else max(prev_val, float(price))
+    if prev_val is not None and peak <= prev_val:
+        return prev_val      # 갱신 없음 — DB 쓰기를 줄인다
+
+    db.upsert_position(
+        conn, ticker, market, qty=float(pos.get("qty") or 0.0),
+        avg_price=float(pos.get("avg_price") or 0.0),
+        entry_time=pos.get("entry_time"),
+        entry_signal=pos.get("entry_signal"),
+        peak_price_since_entry=peak,
+        status="OPEN",
+    )
+    return peak
 
 
 def _order_price_for(module, price: float, *, side: str) -> float:
@@ -200,13 +236,16 @@ def _age_minutes(order: dict) -> float:
 
 def _record_order_pending(conn, *, market: str, ticker: str, side: str, qty: float,
                           price: float | None, order_type: str,
-                          raw_request: dict | None) -> tuple[int, str]:
+                          raw_request: dict | None,
+                          reason: str | None = None) -> tuple[int, str]:
     """
     **주문을 보내기 전에** `SUBMITTED` 행을 먼저 기록한다 (write-ahead, T04).
 
     순서가 핵심이다: 주문을 보낸 뒤 기록하면, 기록 직전에 프로세스가 죽었을 때
     "브로커에는 주문이 있는데 DB 에는 없는" 상태가 된다. 먼저 기록하면 최악의 경우
     "DB 에는 주문이 있는데 브로커에는 없는" 상태가 되고, 이것은 reconcile 이 잡아낸다.
+
+    `reason`(T06): 청산 사유(`STOP_LOSS` 등). 매수 주문은 None 이다.
 
     반환: (order_id, client_ref)
     """
@@ -215,7 +254,7 @@ def _record_order_pending(conn, *, market: str, ticker: str, side: str, qty: flo
         conn, symbol=ticker, market=market, side=side, qty=qty, price=price,
         order_type=order_type, status="SUBMITTED",
         client_ref=client_ref, broker_order_no=None,
-        raw_request=raw_request,
+        reason=reason, raw_request=raw_request,
     )
     logger.info(f"[주문기록] #{order_id} {market} {side} {ticker} {qty:g}주 → SUBMITTED (사전 기록)")
     return order_id, client_ref
@@ -271,7 +310,8 @@ class DuplicateOrderBlocked(RuntimeError):
 
 
 def _submit_order(conn, *, market: str, ticker: str, side: str, qty: float,
-                  price: float | None, order_type: str, make_body, send) -> int:
+                  price: float | None, order_type: str, make_body, send,
+                  reason: str | None = None) -> int:
     """
     주문 1건을 **사전 기록 → 전송 → 상태 확정** 순서로 낸다 (T04).
 
@@ -283,6 +323,9 @@ def _submit_order(conn, *, market: str, ticker: str, side: str, qty: float,
       3. 전송 실패의 결과가 미확정이면 `UNKNOWN` 으로 기록한다(재시도하지 않음).
       4. 응답에서 주문번호를 얻으면 기록해 둔다(체결 조회는 다음 사이클의
          `_settle_order()` 가 한다). 아직 얻지 못하면 `SUBMITTED` 로 남기고 로그로 알린다.
+
+    `reason`(T06): 청산 사유. `orders.reason` 에 남겨 "왜 이 주문이 나갔는지"를
+    나중에 확인할 수 있게 한다(요구사항 4).
 
     반환: `orders.id`
     """
@@ -296,7 +339,7 @@ def _submit_order(conn, *, market: str, ticker: str, side: str, qty: float,
     body = make_body()
     order_id, _client_ref = _record_order_pending(
         conn, market=market, ticker=ticker, side=side, qty=qty, price=price,
-        order_type=order_type, raw_request=body,
+        order_type=order_type, raw_request=body, reason=reason,
     )
 
     def on_uncertain(exc):
@@ -562,19 +605,124 @@ def _place_sell(prefix: str, market: str | None, ticker: str, qty: float, sell_f
     logger.info(f"{prefix} 매도 주문 접수 {qty:.0f}주 (체결 확인은 다음 사이클)")
 
 
+def _exit_order_type(reason: str) -> str:
+    """
+    청산 사유별 주문 유형(limit/market)을 정한다 (요구사항 2).
+
+    `config.ORDER_TYPE` 은 전역 설정이라 청산마다 다르게 쓸 수 없다. 손절·시간청산은
+    **반드시 체결되어야** 하므로 기본이 시장가다 — `cancel_order` 가 미구현(T04b)이라
+    지정가가 미체결로 남으면 취소할 수 없고 포지션이 그대로 남는다.
+    목표가 익절은 지정가를 허용한다(미체결이 손실은 아니다).
+    """
+    table = {
+        exit_rules.STOP_LOSS: config.EXIT_ORDER_TYPE_STOP_LOSS,
+        exit_rules.TIME_EXIT: config.EXIT_ORDER_TYPE_TIME_EXIT,
+        exit_rules.TAKE_PROFIT: config.EXIT_ORDER_TYPE_TAKE_PROFIT,
+        exit_rules.TRAILING: config.EXIT_ORDER_TYPE_TRAILING,
+        exit_rules.OVERBOUGHT: config.EXIT_ORDER_TYPE_OVERBOUGHT,
+    }
+    value = str(table.get(reason, "market")).strip().lower()
+    if value not in ("limit", "market"):
+        # 모르는 값을 지정가로 해석하면 체결되지 않는 주문이 나갈 수 있다.
+        # 체결이 우선인 청산이므로 안전한 쪽(시장가)으로 두고 크게 알린다.
+        logger.critical(
+            f"🚨 청산 주문 유형 설정이 잘못되었습니다 ({reason}: {value!r}) — "
+            f"시장가(체결 우선)로 진행합니다."
+        )
+        return "market"
+    return value
+
+
+def _confirm_sell_quantity(prefix: str, market: str, ticker: str, qty: float,
+                           refresh_balance) -> float | None:
+    """
+    매도 직전에 **브로커 잔고의 실제 보유 수량**으로 청산 수량을 재확인한다 (요구사항 5).
+
+    DB 만 믿으면 안 된다 — 분할 매도·부분 체결·사람의 수동 매도로 DB 와 브로커가
+    어긋날 수 있고, 그 상태로 전량 매도를 내면 **보유하지 않은 수량**을 팔려고 해
+    주문이 거부되거나(운 좋은 경우) 초과 매도가 된다.
+
+    반환: 주문할 수량, 또는 주문하면 안 되는 경우 None.
+    """
+    try:
+        fresh = refresh_balance()
+    except Exception as e:
+        logger.error(f"⛔ {prefix} 매도 직전 잔고 재조회 실패 — 주문하지 않습니다: {e}")
+        return None
+
+    actual = float((fresh or {}).get("quantity") or 0.0)
+    if actual <= 0:
+        logger.critical(
+            f"🚨 {prefix} 브로커 보유 수량이 0 인데 청산을 시도했습니다 "
+            f"(DB {qty:.0f}주) — 주문하지 않고 reconcile 로 확인합니다."
+        )
+        _trigger_reconcile_check(f"{prefix} {ticker}: DB {qty:.0f}주 vs 브로커 0주")
+        return None
+    if actual < qty:
+        # DB 가 실제보다 많다. 많은 쪽으로 팔면 초과 주문이므로 실제 수량으로 줄인다.
+        logger.warning(
+            f"⚠️ {prefix} 보유 수량 불일치 — DB {qty:.0f}주 > 브로커 {actual:.0f}주. "
+            f"브로커 기준 {actual:.0f}주만 매도합니다."
+        )
+        _trigger_reconcile_check(f"{prefix} {ticker}: DB {qty:.0f}주 > 브로커 {actual:.0f}주")
+        return actual
+    if actual > qty:
+        # 봇이 모르는 수량이 있다. 그 전부를 팔면 봇이 만들지 않은 보유까지 팔게 된다.
+        logger.warning(
+            f"⚠️ {prefix} 보유 수량 불일치 — 브로커 {actual:.0f}주 > DB {qty:.0f}주. "
+            f"DB 가 아는 {qty:.0f}주만 매도하고 reconcile 로 확인합니다."
+        )
+        _trigger_reconcile_check(f"{prefix} {ticker}: 브로커 {actual:.0f}주 > DB {qty:.0f}주")
+        return qty
+    return qty
+
+
+def _trigger_reconcile_check(what: str) -> None:
+    """
+    매도 직전 수량 불일치를 **reconcile 경로로 넘겨** 사람이 보게 한다 (요구사항 5).
+
+    `reconcile.reconcile(conn)` 이 브로커 조회를 **다시** 하므로 여기서 만든 불일치
+    사실과 어긋날 수 있지만, 그것을 확인하는 것이 목적이다. 이 함수는 대조를
+    강제로 돌려 중단 플래그·CRITICAL 로그를 남기고, 실패해도 매도 판단 자체는
+    이미 끝났으므로 삼키지 않고 경고만 남긴다(주문은 호출부가 이미 보류했다).
+    """
+    logger.critical(
+        f"🚨 매도 전 수량 불일치 감지 — {what}\n"
+        f"   reconcile 대조를 실행합니다. 불일치가 확인되면 신규 매매가 중단됩니다.\n"
+        f"   해제: 불일치를 확인한 뒤 `reconcile.resume_trading(conn)` 을 실행하세요."
+    )
+    try:
+        reconcile.reconcile(_state_conn())
+    except Exception as e:
+        logger.error(f"⛔ reconcile 대조 실행 실패 — 수동으로 확인하세요: {e}")
+
+
 def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_fn,
                 signal: dict | None = None, market: str | None = None,
-                avg_price: float | None = None, submit_sell=None) -> bool:
+                avg_price: float | None = None, submit_sell=None,
+                *, position: dict | None = None, current_price: float | None = None,
+                bar_info: dict | None = None, refresh_balance=None,
+                now: datetime | None = None) -> bool:
     """
-    손절·부분 익절 판단 및 실행. 매도했으면 True.
+    청산 판단 및 실행 (T06). 매도했으면 True.
+
+    **판단은 `exit_rules.evaluate_exit()` 가 한다**(순수 함수, I/O 없음). 여기서는
+    I/O 만 한다 — 포지션·현재가 조회, 브로커 수량 재확인, 주문.
 
     Args:
-        sell_fn: (수량) -> 주문 실행 콜러블
-        signal: 지표 신호 (indicators.evaluate 결과). None이면 수익률만으로 판단.
+        sell_fn: (수량) -> 주문 실행 콜러블 (DB 기록 없는 하위 호환 경로)
+        signal: 지표 신호(indicators.evaluate). 과매수 청산에만 쓰고 값은 바뀌지 않는다.
         market: 포지션 시장 구분(DB 기록용). None이면 DB 기록을 건너뛴다(하위 호환).
-        avg_price: 평균 단가(DB 기록용). None이면 기존 값을 유지한다.
-        submit_sell: (수량) -> order_id. 주문을 write-ahead 로 내는 콜러블 (T04).
-                None 이면 `sell_fn` 을 그대로 부른다(DB 기록 없음 — 하위 호환 경로).
+        avg_price: 평균 단가(DB 기록용). None이면 DB 값을 쓴다.
+        submit_sell: (사유, 수량) -> order_id. write-ahead 주문 콜러블 (T04/T06)
+        position: 진입 시각·고점 등이 담긴 포지션 dict. None 이면 DB 에서 읽는다.
+        current_price: 현재가. None 이면 `avg_price × (1+수익률)` 로 역산한다.
+        bar_info: {"atr": float|None, "overbought": bool}. 없으면 ATR·과매수 판단을 건너뛴다.
+        refresh_balance: () -> 잔고 dict. 주면 **주문 직전에** 실제 보유 수량을 재확인한다
+                (요구사항 5). 없으면 DB 수량을 그대로 쓴다는 뜻이며, 그때는 경고를 남긴다.
+        now: 판단 기준 시각(tz-aware). None 이면 `db.now_kst()`.
+
+    사유 문자열(`STOP_LOSS` 등)은 `orders.reason` 과 로그에 그대로 남는다(요구사항 4).
     """
     if qty <= 0:
         logger.info(f"⏩ {prefix} 매도 조건 미충족 (보유 수량 없음)")
@@ -584,9 +732,10 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
     # 매도 수량은 **브로커 잔고**에서 오므로, DB 상태를 보지 않으면 봇이 만들지 않은
     # 보유까지 손절·익절 규칙으로 팔아버린다. `EXTERNAL` 은 "봇이 만든 기록이 없는 보유"이므로
     # 봇의 관리 대상이 아니다. 사람이 직접 정리해야 한다.
+    pos = position
     if market:
         try:
-            pos = db.get_position(_state_conn(), ticker, market)
+            pos = pos if pos is not None else db.get_position(_state_conn(), ticker, market)
         except Exception as e:
             # 상태를 못 읽었는데 매도하면 위험하다. 모르면 팔지 않는다.
             logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매도를 건너뜁니다: {e}")
@@ -598,108 +747,72 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
             )
             return True
 
-    # ── 1. 손절 ──────────────────────────────────────────
-    if config.STOP_LOSS_THRESHOLD < 0 and profit_rate <= config.STOP_LOSS_THRESHOLD:
+    # ── 1. 청산 판단 (순수 함수, I/O 없음) ────────────────
+    # 가격은 **한 출처에서만** 가져온다.
+    # `avg_price` 와 `profit_rate` 는 같은 잔고 응답에서 온 값이라 서로 모순되지 않는다.
+    # 별도 시세 API 의 현재가를 섞으면 두 값이 어긋날 때(-10% 라는데 계산은 0%)
+    # 손절이 발동하지 않는 상태가 생긴다 — 실제로 이 사이클에서 그런 불일치가 있었다.
+    # 그래서 현재가는 수익률에서 **역산**한다(비율만 맞으면 되므로 수익률 계산에 충분하다).
+    entry_price = float(avg_price or (pos or {}).get("avg_price") or 0.0)
+    current_price = entry_price * (1.0 + profit_rate / 100.0) if entry_price > 0 else 0.0
+
+    judgment = {
+        "qty": qty,
+        "avg_price": entry_price,
+        "current_price": current_price,
+        "entry_time": (pos or {}).get("entry_time"),
+        "peak_price_since_entry": (pos or {}).get("peak_price_since_entry"),
+        # 시장을 모르면 보유 거래일을 셀 수 없어 시간청산이 발동하지 않는다
+        # (exit_rules 가 경고를 남긴다). 임의로 다른 시장을 가정하지 않는다.
+        "market": market,
+    }
+    exit_signal = exit_rules.evaluate_exit(
+        judgment, bar_info, exit_rules.params_from_config(),
+        now or db.now_kst(),
+    )
+    if exit_signal is None:
         logger.info(
-            f"🛑 {prefix} 손절 조건 충족 ({profit_rate:.2f}% ≤ {config.STOP_LOSS_THRESHOLD}%) "
-            f"— {qty:.0f}주 전량 매도"
+            f"⏩ {prefix} 매도 조건 미충족 (수익률: {profit_rate:.2f}%, "
+            f"기준: 목표 +{config.TAKE_PROFIT_PCT}% / 손절 {config.STOP_LOSS_PCT}% / "
+            f"최대 {config.MAX_HOLD_TRADING_DAYS}거래일)"
         )
-        try:
-            _place_sell(prefix, market, ticker, qty, sell_fn, submit_sell)
-            bot_state.set_bought_today(ticker, False)
-            bot_state.set_profit_stage(ticker, 0)
-        except Exception as e:
-            logger.error(f"{prefix} 손절 주문 실패: {e}")
-            return True
-        return True
+        return False
 
-    # ── 2. 부분 익절 ─────────────────────────────────────
-    # 도달한 단계를 순서대로 모두 실행한다. (급등으로 여러 단계를 한 번에
-    # 넘어선 경우에도 다음 사이클을 기다리지 않고 즉시 분할 매도)
-    stage = bot_state.profit_stage(ticker)
-    remaining = qty
-    sold_any = False
+    reason = exit_signal.reason
+    label = exit_rules.LABELS[reason]
+    logger.info(
+        f"📤 {prefix} 청산 판단 — {label}({reason}): {exit_signal.detail} "
+        f"→ {qty:.0f}주 전량 매도"
+    )
 
-    # 미충족 사유 로깅용 (첫 번째 미도달 단계)
-    block_pct: float | None = None
+    # ── 2. 브로커 보유 수량 재확인 (요구사항 5) ───────────
+    sell_qty = qty
+    if market and refresh_balance is not None:
+        confirmed = _confirm_sell_quantity(prefix, market, ticker, qty, refresh_balance)
+        if confirmed is None:
+            return True         # 불일치 — 주문하지 않는다(사람이 확인해야 한다)
+        sell_qty = confirmed
 
-    # 지표 과매수 신호: 수익 중일 때만 익절 트리거로 인정
-    indicator_sell = bool(signal and signal.get("sell_signal") and profit_rate > 0)
-    if signal and signal.get("sell_signal") and profit_rate <= 0:
-        logger.info(f"ℹ️ {prefix} 지표 과매수 신호지만 수익 중이 아니어서 익절 보류 (수익률 {profit_rate:.2f}%)")
-
-    while stage < len(config.TAKE_PROFIT_STEPS):
-        target_pct, ratio = config.TAKE_PROFIT_STEPS[stage]
-        # 수익률 도달이면 정상 진행 (여러 단계를 한 번에 넘어설 수 있음)
-        by_profit = profit_rate >= target_pct
-        # 수익률 미달이면 지표 과매수일 때만, 그리고 이번 단계 하나만 실행한다
-        by_indicator = (not by_profit) and indicator_sell
-
-        if not (by_profit or by_indicator):
-            block_pct = target_pct
-            break
-        # 지표 신호로 진입한 경우에도 손실 중이면 매도하지 않음
-        if profit_rate <= 0:
-            block_pct = target_pct
-            break
-
-        # 마지막 단계(비중 100%)는 남은 수량 전량
-        if ratio >= 100:
-            sell_qty = remaining
+    # ── 3. 주문 (사유를 함께 넘긴다) ─────────────────────
+    try:
+        if submit_sell is not None and market:
+            submit_sell(reason, sell_qty)
         else:
-            sell_qty = max(1, min(round(remaining * ratio / 100), int(remaining)))
+            _place_sell(prefix, market, ticker, sell_qty, sell_fn, None)
+    except Exception as e:
+        logger.error(f"❌ {prefix} 청산({reason}) 주문 실패: {e}")
+        return True     # 매도 시도는 했다 — 다음 사이클에 다시 판단한다
 
-        trigger = (
-            f"수익률 {profit_rate:.2f}% ≥ {target_pct}%"
-            if profit_rate >= target_pct
-            else f"지표 과매수 (RSI {signal.get('rsi', 0):.1f} ≥ {config.RSI_OVERBOUGHT:g})"
-        )
-        logger.info(
-            f"💰 {prefix} 부분 익절 {stage + 1}단계 ({trigger}) "
-            f"— {sell_qty:.0f}주 매도 (보유 {remaining:.0f}주)"
-        )
-        try:
-            _place_sell(prefix, market, ticker, sell_qty, sell_fn, submit_sell)
-        except Exception as e:
-            logger.error(f"{prefix} 부분 익절 주문 실패: {e}")
-            break
-
-        remaining -= sell_qty
-        stage += 1
-        sold_any = True
-        bot_state.set_profit_stage(ticker, stage)
-
-        if remaining <= 0:
-            break
-        # 지표 과매수만으로 진입한 경우엔 한 단계만 매도하고 종료
-        # (급등으로 수익률이 여러 단계를 넘어선 경우에는 계속 진행)
-        if by_indicator and not by_profit:
-            break
-
-    # 전량 매도한 경우에만 매수 플래그 초기화 (남은 수량이 있으면 유지)
-    if sold_any and remaining <= 0:
-        bot_state.set_bought_today(ticker, False)
-        bot_state.set_profit_stage(ticker, 0)
-
-    if not sold_any:
-        if block_pct is not None:
-            summary = "/".join(f"+{p:g}%" for p, _ in config.TAKE_PROFIT_STEPS)
-            logger.info(
-                f"⏩ {prefix} 매도 조건 미충족 (수익률: {profit_rate:.2f}%, "
-                f"다음 목표: +{block_pct:g}%, 전체 단계: {summary})"
-            )
-        else:
-            logger.info(
-                f"⏩ {prefix} 매도 조건 미충족 (수익률: {profit_rate:.2f}%, "
-                f"금일 익절 단계 모두 소진 {stage}/{len(config.TAKE_PROFIT_STEPS)})"
-            )
-    return sold_any
+    # 청산은 전량이므로 당일 재진입을 허용한다(부분 매도 상태가 없다).
+    bot_state.set_bought_today(ticker, False)
+    return True
 
 
 def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
                ai_score: int, ratio: float, price_fmt: str, sell_fn, buy_fn,
                fetch_closes=None, market: str | None = None,
-               submit_buy=None, submit_sell=None, status_fn=None, cancel_fn=None):
+               submit_buy=None, submit_sell=None, status_fn=None, cancel_fn=None,
+               refresh_balance=None, refresh_peak=None, now: datetime | None = None):
     """
     해외·국내 공통 매매 사이클 로직.
 
@@ -710,14 +823,31 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
                 T04 부터 실제 주문은 `submit_*` 가 내므로, `buy_fn` 은 예산으로
                 1주라도 살 수 있는지 판단하는 데만 쓰인다(`_BudgetProbe`).
         market: 시장 구분(DB 기록용). None이면 DB 기록을 건너뛰고 예전 경로를 쓴다.
-        submit_buy / submit_sell: (수량) -> order_id. write-ahead 기록 + 전송 (T04)
+        submit_buy: (예산) -> order_id. write-ahead 기록 + 전송 (T04)
+        submit_sell: (사유, 수량) -> order_id. **T06 에서 사유가 추가됐다.**
         status_fn / cancel_fn: 체결 조회 / 미체결 취소 (T04)
+        refresh_balance: () -> 잔고 dict. 청산 직전 실제 보유 수량 재확인 (요구사항 5)
+        refresh_peak: () -> float|None. 진입 후 고점 갱신 (트레일링용, 요구사항 2)
+        now: 판단 기준 시각(tz-aware). None 이면 `db.now_kst()`.
     """
     qty         = balance["quantity"]
     avg_price   = balance["avg_price"]
     profit_rate = balance["profit_rate"]
     total_krw   = balance["total_asset_krw"]
     cash_krw    = balance["cash_krw"]
+
+    # 판단 기준 시각. tz-aware 만 쓴다(절대 규칙 9).
+    now = now or db.now_kst()
+
+    # ── 진입 후 고점 갱신 (트레일링 스톱, 요구사항 2) ─────
+    # 청산 판단 **전에** 갱신한다 — 갱신이 늦으면 고점이 실제보다 낮게 잡혀
+    # 트레일링이 늦게 발동한다. 갱신에 실패해도 청산 판단은 계속한다(가격 기반
+    # 규칙이 고점 하나 때문에 멈추면 안 된다).
+    if qty > 0 and market and refresh_peak is not None:
+        try:
+            refresh_peak()
+        except Exception as e:
+            logger.warning(f"⚠️ [{prefix}] 진입 후 고점 갱신 실패 — 청산 판단은 계속합니다: {e}")
 
     logger.info(
         f"[{prefix} 현황] 현재가: {price_fmt(current_price)} | 평균단가: {price_fmt(avg_price)} | "
@@ -744,16 +874,26 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             logger.info(f"[{prefix} 지표] {signal['reason']}")
         except indicators.IndicatorDataUnavailable as e:
             # 조회 실패를 "신호 없음"으로 바꾸면 하락률 폴백 매수로 이어진다 (T04).
-            # 데이터를 모를 때는 사지 않는다. 매도 판단은 수익률 기준으로 계속한다.
+            # 데이터를 모를 때는 사지 않는다. 청산 판단은 가격 기반 규칙으로 계속한다.
             logger.error(f"⛔ [{prefix}] 지표 데이터 없음 — 이번 사이클 매수를 보류합니다: {e}")
             _check_sell(prefix, ticker, qty, profit_rate, sell_fn, None,
                         market=market, avg_price=avg_price,
-                        submit_sell=submit_sell)
+                        submit_sell=submit_sell, current_price=current_price,
+                        now=now)
             return
 
-    # ── 매도 (손절 > 부분 익절) ──────────────────────────
+    # ── 청산 (순수 함수 판단 → I/O 실행, T06) ─────────────
+    # 과매수 청산은 T06 에서 기본 꺼짐이라 `sell_signal` 을 그대로 쓰지 않고
+    # 설정이 켜져 있을 때만 켠다(검증되지 않은 신호를 청산 사유에 섞지 않는다).
+    bar_info = {
+        "atr": None,
+        "overbought": bool(signal and signal.get("sell_signal"))
+                      and config.OVERBOUGHT_EXIT_ENABLED,
+    }
     if _check_sell(prefix, ticker, qty, profit_rate, sell_fn, signal,
-                   market=market, avg_price=avg_price, submit_sell=submit_sell):
+                   market=market, avg_price=avg_price, submit_sell=submit_sell,
+                   current_price=current_price, bar_info=bar_info,
+                   refresh_balance=refresh_balance, now=now):
         return
 
     # ── 매수 ────────────────────────────────────────────
@@ -920,12 +1060,19 @@ def run_overseas_cycle(ai_score: int):
                                                            on_uncertain=on_uncertain),
         )
 
-    def submit_sell(qty: float) -> int:
+    def submit_sell(reason: str, qty: float) -> int:
+        """
+        청산 매도 주문 (T06). `reason` 은 `orders.reason` 에 남긴다(요구사항 4).
+
+        해외는 시장가 미구현(`kis.order_body`)이라 사유와 무관하게 지정가로 난다 —
+        **갭 하락 시 손절이 체결되지 않을 수 있다**(T06 보고서 참고).
+        """
+        order_type = _exit_order_type(reason)
         order_price = _order_price_for(kis, current_price, side="SELL")
         return _submit_order(
             conn, market=MARKET_OVERSEAS, ticker=ticker, side="SELL", qty=qty,
-            price=order_price, order_type="LIMIT",
-            make_body=lambda: kis.order_body(qty, order_price),
+            price=order_price, order_type="LIMIT", reason=reason,
+            make_body=lambda: kis.order_body(qty, order_price, order_type=order_type),
             send=lambda body, on_uncertain: kis.send_order(body, side="SELL",
                                                            on_uncertain=on_uncertain),
         )
@@ -951,6 +1098,9 @@ def run_overseas_cycle(ai_score: int):
         lambda: kis.get_daily_closes(ticker),
         market=MARKET_OVERSEAS, submit_buy=submit_buy, submit_sell=submit_sell,
         status_fn=status_fn, cancel_fn=cancel_fn,
+        # 청산 직전 실제 보유 수량 재확인 (요구사항 5). 잔고 API 를 다시 부른다.
+        refresh_balance=kis.get_balance,
+        refresh_peak=lambda: _refresh_peak(conn, ticker, MARKET_OVERSEAS, current_price),
     )
 
 
@@ -980,11 +1130,19 @@ def run_domestic_cycle(ai_score: int):
                                                        on_uncertain=on_uncertain),
         )
 
-    def submit_sell(qty: float) -> int:
-        body = kd.order_body(ticker, int(qty), current_price, side="SELL")
+    def submit_sell(reason: str, qty: float) -> int:
+        """
+        청산 매도 주문 (T06). 사유별로 주문 유형이 다르다 (`config.EXIT_ORDER_TYPE_*`).
+
+        손절·시간청산은 시장가로 낸다 — 지정가가 미체결로 남으면 `cancel_order` 가
+        미구현(T04b)이라 취소할 수 없고 포지션이 그대로 남는다.
+        """
+        order_type = _exit_order_type(reason)
+        body = kd.order_body(ticker, int(qty), current_price, side="SELL",
+                             order_type=order_type)
         return _submit_order(
             conn, market=MARKET_DOMESTIC, ticker=ticker, side="SELL", qty=qty,
-            price=float(body["ORD_UNPR"]), order_type=_order_type_label(),
+            price=float(body["ORD_UNPR"]), order_type=order_type.upper(), reason=reason,
             make_body=lambda: body,
             send=lambda b, on_uncertain: kd.send_order(b, side="SELL",
                                                        on_uncertain=on_uncertain),
@@ -1012,4 +1170,7 @@ def run_domestic_cycle(ai_score: int):
         lambda: kd.get_daily_closes(ticker),
         market=MARKET_DOMESTIC, submit_buy=submit_buy, submit_sell=submit_sell,
         status_fn=status_fn, cancel_fn=cancel_fn,
+        # 청산 직전 실제 보유 수량 재확인 (요구사항 5). 잔고 API 를 다시 부른다.
+        refresh_balance=lambda: kd.get_domestic_balance(ticker),
+        refresh_peak=lambda: _refresh_peak(conn, ticker, MARKET_DOMESTIC, current_price),
     )

@@ -474,12 +474,22 @@ def get_usd_krw_rate() -> float:
 # 주문
 # ─────────────────────────────────────────────
 
-def order_body(quantity, price_usd: float) -> dict:
+def order_body(quantity, price_usd: float, *, order_type: str | None = None) -> dict:
     """
     해외 주문 공통 body (매수·매도가 같은 구조). 전송될 값 그대로.
 
     T04: 호출부(trader)가 주문 전에 이 body 를 `orders.raw_request` 에 기록한다.
+
+    `order_type`(T06): 국내와 달리 **시장가를 지원하지 않는다.** `docs/kis_api_fields.md`
+    는 해외주식 주문 API 를 "이 파일에 없는 것 (추측 금지)" 목록에 명시하고 있다.
+    해외 `ORD_DVSN` 코드표(시장가 코드)와 시장가일 때의 `OVRS_ORD_UNPR` 규칙을
+    확인할 수 없어, 추측 대신 **미구현으로 막는다**(절대 규칙 4).
     """
+    if order_type is not None and str(order_type).strip().lower() != "limit":
+        raise NotImplementedError(
+            "해외주식 시장가 주문은 docs/kis_api_fields.md 에 ORD_DVSN 코드표가 없어 "
+            "구현하지 않았습니다(절대 규칙 4). 확인 전에는 지정가만 낼 수 있습니다."
+        )
     account_no, account_suffix = config.KIS_ACCOUNT_NO.split("-")
     return {
         "CANO": account_no,

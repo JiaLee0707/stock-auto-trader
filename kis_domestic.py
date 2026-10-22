@@ -74,24 +74,34 @@ def tick_size(price: float) -> int:
     return _TICK_TABLE_ABOVE
 
 
-def _order_dvsn() -> str:
+def _resolve_order_type(order_type: str | None) -> str:
+    """주문 유형을 확정한다. None 이면 전역 설정(`config.ORDER_TYPE`)을 쓴다."""
+    value = config.ORDER_TYPE if order_type is None else order_type
+    value = str(value).strip().lower()
+    if value not in ("limit", "market"):
+        raise ValueError(
+            f"주문 유형은 limit 또는 market 이어야 합니다: {value!r}"
+        )
+    return value
+
+
+def _order_dvsn(order_type: str | None = None) -> str:
     """
-    설정된 주문 유형에 맞는 ORD_DVSN 코드.
+    주문 유형에 맞는 ORD_DVSN 코드.
 
     근거: docs/kis_api_fields.md §1 Request Body — 00 지정가 / 01 시장가.
-    `ORDER_TYPE` 이 limit/market 이외 값이면 조용히 넘어가지 않고 예외로 막는다
-    (모르는 값을 지정가로 해석하면 의도와 다른 주문이 나갈 수 있다).
+    `order_type` 을 주면 전역 설정 대신 그 값을 쓴다 — **T06 청산은 사유별로
+    주문 유형이 다르다**(손절·시간청산=시장가, 목표가=지정가). 전역 `ORDER_TYPE`
+    하나로는 표현할 수 없어 주문 단위로 덮어쓸 수 있게 했다.
+    모르는 값은 조용히 넘어가지 않고 예외로 막는다
+    (지정가로 해석하면 의도와 다른 주문이 나갈 수 있다).
     """
-    if config.ORDER_TYPE == "market":
+    if _resolve_order_type(order_type) == "market":
         return _DVSN_MARKET
-    if config.ORDER_TYPE == "limit":
-        return _DVSN_LIMIT
-    raise ValueError(
-        f"ORDER_TYPE 은 limit 또는 market 이어야 합니다: {config.ORDER_TYPE!r}"
-    )
+    return _DVSN_LIMIT
 
 
-def _order_price(price: float, *, side: str) -> str:
+def _order_price(price: float, *, side: str, order_type: str | None = None) -> str:
     """
     주문단가(ORD_UNPR) 문자열. **지정가일 때만** 단가를 계산한다.
 
@@ -99,7 +109,7 @@ def _order_price(price: float, *, side: str) -> str:
     지정가는 매수 현재가 + N틱, 매도 현재가 − N틱.
     `ORDER_PRICE_TICKS=0` 이면 현재가 그대로다(틱 표가 검증되지 않았을 때 안전한 선택).
     """
-    if _order_dvsn() == _DVSN_MARKET:
+    if _order_dvsn(order_type) == _DVSN_MARKET:
         return "0"      # 시장가: 문서 기준 ORD_UNPR = "0"
     ticks = max(0, int(config.ORDER_PRICE_TICKS))
     unit = tick_size(price)
@@ -348,13 +358,17 @@ def get_orderable_cash(ticker: str, price: float) -> float:
     return _num(output.get("ord_psbl_cash"))
 
 
-def order_body(ticker: str, quantity: int, price: float, *, side: str) -> dict:
+def order_body(ticker: str, quantity: int, price: float, *, side: str,
+               order_type: str | None = None) -> dict:
     """
     국내 주문 **요청 body**를 만든다 (전송될 값 그대로).
 
     T04: 호출부(trader)가 주문을 보내기 **전에** 이 body 를 `orders.raw_request` 에
     기록해야 "무엇을 주문했는지"를 사후에 확인할 수 있다. 그래서 body 생성을
     전송과 분리해 노출한다.
+
+    `order_type`(T06): 주면 전역 `config.ORDER_TYPE` 대신 그 유형으로 만든다.
+    청산은 사유별로 유형이 다르다(손절=시장가 / 목표가=지정가).
     """
     if side not in ("BUY", "SELL"):
         raise ValueError(f"허용되지 않는 주문 방향: {side!r}")
@@ -363,9 +377,9 @@ def order_body(ticker: str, quantity: int, price: float, *, side: str) -> dict:
         "CANO": cano,
         "ACNT_PRDT_CD": prdt,
         "PDNO": ticker,
-        "ORD_DVSN": _order_dvsn(),
+        "ORD_DVSN": _order_dvsn(order_type),
         "ORD_QTY": str(int(quantity)),
-        "ORD_UNPR": _order_price(price, side=side),
+        "ORD_UNPR": _order_price(price, side=side, order_type=order_type),
     }
 
 

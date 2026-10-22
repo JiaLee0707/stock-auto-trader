@@ -106,7 +106,10 @@ _MIGRATIONS: list[tuple[int, str]] = [
         qty                    REAL NOT NULL DEFAULT 0,
         avg_price              REAL NOT NULL DEFAULT 0,
         entry_time             TEXT,
+        -- T06: 부분 익절 폐기로 `entry_signal_json` 은 **더 이상 쓰지 않는다**(열은 유지).
+        -- 기존 DB 의 값을 지우면 이력이 사라지므로 남겨 둔다. 새 포지션은 NULL 이다.
         entry_signal_json      TEXT,
+        -- 트레일링 스톱(요구사항 2)이 쓰는 진입 후 고점. 사이클마다 갱신한다.
         peak_price_since_entry REAL,
         status                 TEXT NOT NULL DEFAULT 'OPEN',
         PRIMARY KEY (symbol, market)
@@ -310,8 +313,14 @@ def config_hash() -> str:
         "bb_num_std": config.BB_NUM_STD,
         "max_buys_per_day": config.MAX_BUYS_PER_DAY,
         "min_buy_interval_hours": config.MIN_BUY_INTERVAL_HOURS,
-        "take_profit_steps": config.TAKE_PROFIT_STEPS,
-        "stop_loss_threshold": config.STOP_LOSS_THRESHOLD,
+        # T06: 청산 규칙이 바뀌었다(부분 익절 폐기). 지문도 새 규칙을 반영해야
+        # "어떤 설정으로 낸 주문인지" 추적이 유지된다.
+        "take_profit_pct": config.TAKE_PROFIT_PCT,
+        "stop_loss_pct": config.STOP_LOSS_PCT,
+        "stop_loss_atr_mult": config.STOP_LOSS_ATR_MULT,
+        "max_hold_trading_days": config.MAX_HOLD_TRADING_DAYS,
+        "trailing_stop_enabled": config.TRAILING_STOP_ENABLED,
+        "overbought_exit_enabled": config.OVERBOUGHT_EXIT_ENABLED,
         "dip_threshold": config.DIP_THRESHOLD,
         "buy_ratio": config.BUY_RATIO,
         "domestic_buy_ratio": config.DOMESTIC_BUY_RATIO,

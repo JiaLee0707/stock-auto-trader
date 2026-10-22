@@ -5,10 +5,9 @@
 
 - 금일 매수 횟수·시각: `daily_counters` 를 **날짜 키**로 조회하므로 날짜가 바뀌면
   자동으로 0회가 된다(별도 리셋 로직이 필요 없다).
-- 익절 단계: 기존과 동일하게 당일 기준이다. 같은 `daily_counters` 의 `buy_count` 와
-  별도로, 단계는 프로세스 내 상태가 아니라 DB `kv` 가 아닌 **당일 카운터의 확장**으로
-  관리하지 않고 메모리에 둔다 — 아래 "익절 단계" 주석 참고.
 - 시간은 tz-aware KST(절대 규칙 9).
+- **T06**: 부분 익절 단계(`profit_stage`)를 삭제했다. 청산 판단에 "오늘 몇 단계까지
+  팔았나"를 기억할 필요가 없어졌다 — 청산은 전량이고, 상태는 `positions` 가 갖는다.
 
 공개 함수 시그니처는 기존과 동일하게 유지한다(교체 전 `BotState` 와 호환).
 `date.today()` 리셋 로직은 없어졌지만 외부 동작(날짜가 바뀌면 0부터)은 같다.
@@ -40,9 +39,6 @@ class BotState:
         else:
             self._conn = conn
             self._owns_conn = False
-        # 익절 단계는 "당일 도달 단계"라 프로세스 재시작 시 0으로 돌아가는 것이 맞다.
-        # (재시작 후에는 어차피 브로커 잔고 기준으로 다시 판단한다.)
-        self._profit_stages: dict = {}
 
     # ── 내부 ────────────────────────────────────────────
     def _today(self) -> str:
@@ -91,15 +87,6 @@ class BotState:
         """매수 1회 기록 (횟수 증가 + 시각 갱신)."""
         count = db.increment_buy_count(self._conn, self._today(), ticker)
         logger.info(f"[state] {ticker} 당일 매수 {count}회 기록")
-
-    # ── 부분 익절 단계 (당일 종목별 도달 단계) ────────────
-    def profit_stage(self, ticker: str) -> int:
-        """당일 이미 실행한 익절 단계 수 (0이면 미실행)."""
-        return int(self._profit_stages.get(ticker, 0))
-
-    def set_profit_stage(self, ticker: str, stage: int):
-        """당일 익절 단계 기록."""
-        self._profit_stages[ticker] = int(stage)
 
     def last_buy_time(self, ticker: str):
         """
