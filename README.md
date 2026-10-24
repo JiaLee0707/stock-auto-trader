@@ -48,13 +48,16 @@ Python 버전: `.python-version` = `3.12.15`
 | `TARGET_TICKER_NAME` | `QQQ` | 해외 종목 표시명 |
 | `IS_OVERSEAS_ENABLED` | 모의=`True`, 실전=`False` | 해외 운용 여부. 실전 소액자본은 QQQ 1주(약 98만원)를 못 사서 기본 비활성 |
 | `IS_DOMESTIC_ENABLED` | `True` | 국내 ETF 운용 여부 |
-| `DOMESTIC_TICKER` | `379800` | 국내 매매 대상 (TIGER 미국나스닥100) |
-| `DOMESTIC_TICKER_NAME` | `TIGER 미국나스닥100` | 국내 종목 표시명 |
+| `DOMESTIC_TICKER` | `379800` | 국내 매매 대상 (KODEX 미국S&P500TR) |
+| `DOMESTIC_TICKER_NAME` | `KODEX 미국S&P500TR` | 국내 종목 표시명 |
 | `NEWS_FEEDS` | Google News(나스닥), Yahoo Finance(QQQ) | AI 분석용 RSS, 콤마 구분 |
 | `NEWS_MAX_ITEMS` | `10` | 뉴스 헤드라인 최대 건수 |
 | `NEWS_TIMEOUT_SEC` | `8` | RSS 요청 타임아웃(초) |
-| `BUY_RATIO` | `0.15` | 해외 1회 매수 비중 (총자산 대비) |
-| `DOMESTIC_BUY_RATIO` | `0.10` | 국내 1회 매수 비중 |
+| `RISK_PER_TRADE_PCT` | `1.0` | 1회 매매에서 감수할 최대 손실(자산 대비 %). 손절 시 손실이 이 값을 넘지 않게 수량 결정 (T07) |
+| `MAX_POSITION_PCT` | `45.0` | 한 종목 최대 투입 금액 (자산 대비 %). 위험 기준이 허용해도 이 선은 넘지 않음 (T07) |
+| `MAX_OPEN_POSITIONS` | `2` | 동시 보유 종목 수 상한. 도달 시 신규 진입만 차단(청산은 계속) (T07) |
+| `MAX_TOTAL_EXPOSURE_PCT` | `90.0` | 총 노출(보유 평가액 합계) 상한 (자산 대비 %) (T07) |
+| `CAPITAL_CAP_KRW` | `0` | 사용 자본 상한(원). **`0` = 상한 없음**. 설정하면 equity와 cash를 **둘 다** 이 값으로 제한해 모의투자에서도 실전 규모로 사이징 (T07) |
 | `DIP_THRESHOLD` | `-1.5` | 지표 폴백 시 평단 대비 매수 하락률(%) |
 | `USE_INDICATORS` | `True` | RSI+볼린저 지표 진입 사용 |
 | `RSI_PERIOD` | `14` | RSI 기간 |

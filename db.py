@@ -322,8 +322,13 @@ def config_hash() -> str:
         "trailing_stop_enabled": config.TRAILING_STOP_ENABLED,
         "overbought_exit_enabled": config.OVERBOUGHT_EXIT_ENABLED,
         "dip_threshold": config.DIP_THRESHOLD,
-        "buy_ratio": config.BUY_RATIO,
-        "domestic_buy_ratio": config.DOMESTIC_BUY_RATIO,
+        # T07: 비중 방식(BUY_RATIO/DOMESTIC_BUY_RATIO)을 폐기하고 위험 기준 사이징으로
+        # 바꿨다. 지문도 새 규칙을 반영해야 추적이 유지된다.
+        "risk_per_trade_pct": config.RISK_PER_TRADE_PCT,
+        "max_position_pct": config.MAX_POSITION_PCT,
+        "max_open_positions": config.MAX_OPEN_POSITIONS,
+        "max_total_exposure_pct": config.MAX_TOTAL_EXPOSURE_PCT,
+        "capital_cap_krw": config.CAPITAL_CAP_KRW,
         "ai_score_floor": config.AI_SCORE_FLOOR,
         "is_mock": config.IS_MOCK,
     }

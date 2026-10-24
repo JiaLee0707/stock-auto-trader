@@ -8,6 +8,38 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── 옛 설정 이름 경고 (T07) ──────────────────────────────
+# 삭제되었거나 이름이 바뀐 설정을 `.env` 에 그대로 두면, 사용자는 그 값이 아직
+# 동작한다고 믿는다. 그러면 "왜 주문 수량이 예상과 다른가"를 알 수 없다.
+#
+# **값은 절대 출력하지 않는다**(절대 규칙 2) — 이름과 "무시됨"만 남긴다.
+# 목록에 없는 이름은 검사하지 않는다: 오타를 넓게 잡으려다 멀쩡한 설정을
+# 경고하면 경고 자체가 무시된다.
+OBSOLETE_ENV_NAMES = {
+    "TAKE_PROFIT_STEPS": "T06 에서 삭제(부분 익절 폐기). 대신 TAKE_PROFIT_PCT 를 쓰세요.",
+    "TAKE_PROFIT_THRESHOLD": "T06 에서 삭제(미사용 상태였음). 대신 TAKE_PROFIT_PCT 를 쓰세요.",
+    "STOP_LOSS_THRESHOLD": "T06 에서 이름 변경. 대신 STOP_LOSS_PCT 를 쓰세요.",
+    "BUY_RATIO": "T07 에서 삭제(비중 방식 폐기). 대신 RISK_PER_TRADE_PCT / MAX_POSITION_PCT 를 쓰세요.",
+    "DOMESTIC_BUY_RATIO": "T07 에서 삭제(비중 방식 폐기). 해외와 같은 위험 규칙을 씁니다.",
+}
+
+
+def warn_obsolete_env(environ=None) -> list[str]:
+    """
+    더 이상 읽지 않는 설정 이름이 환경에 남아 있으면 경고한다 (T07).
+
+    반환: 경고한 이름 목록(테스트·보고용). 값은 읽지도 출력하지도 않는다.
+    """
+    env = os.environ if environ is None else environ
+    found = [name for name in OBSOLETE_ENV_NAMES if env.get(name) not in (None, "")]
+    for name in sorted(found):
+        logging.getLogger("bot").warning(
+            f"⚠️ 설정 {name} 은(는) 더 이상 사용되지 않습니다(무시됨) — "
+            f"{OBSOLETE_ENV_NAMES[name]}"
+        )
+    return found
+
+
 # ── 모드 판정 (T01b: IS_MOCK_TRADING 단일 기준) ──────────
 # 모의/실전 판정은 IS_MOCK_TRADING 하나로만 한다.
 # 허용값은 true/false(대소문자 무시)뿐이며, 그 외 값은 조용히 실전으로 넘어가지 않고 종료한다.
@@ -157,15 +189,18 @@ TARGET_TICKER      = os.getenv("TARGET_TICKER", "QQQ")
 TARGET_TICKER_NAME = os.getenv("TARGET_TICKER_NAME", "QQQ")
 
 # 해외주식 운용 여부. QQQ는 1주에 약 98만원이라 소액 자본에서는 매수가 불가능하다.
-# 1회 매수 예산(BUY_RATIO × 총자산)이 1주 가격보다 작으면 주문이 계속 스킵된다.
+# 1회 매수 예산이 1주 가격보다 작으면 주문이 계속 스킵된다 (T07 사이징으로 완화).
 # 실전투자(소액)는 기본값 False — 국내 ETF만 운용한다. 모의투자는 그대로 True.
 _overseas_default = "False" if not IS_MOCK else "True"
 IS_OVERSEAS_ENABLED   = os.getenv("IS_OVERSEAS_ENABLED", _overseas_default).lower() == "true"
 
 # 국내 ETF (해외와 동시 운용)
 IS_DOMESTIC_ENABLED   = os.getenv("IS_DOMESTIC_ENABLED", "True").lower() == "true"
-DOMESTIC_TICKER       = os.getenv("DOMESTIC_TICKER", "379800")   # TIGER 미국나스닥100
-DOMESTIC_TICKER_NAME  = os.getenv("DOMESTIC_TICKER_NAME", "TIGER 미국나스닥100")
+# T07 정정: 379800 은 "TIGER 미국나스닥100" 이 아니라 **"KODEX 미국S&P500TR"** 다.
+# (나스닥100 ETF 는 379810 이다.) 매매 동작에는 영향이 없으나, 로그·문서에 종목명이
+# 틀리면 사용자가 다른 종목을 사고 있다고 오해한다.
+DOMESTIC_TICKER       = os.getenv("DOMESTIC_TICKER", "379800")
+DOMESTIC_TICKER_NAME  = os.getenv("DOMESTIC_TICKER_NAME", "KODEX 미국S&P500TR")
 
 # AI 분석용 뉴스 수집 (RSS, 콤마 구분으로 교체 가능)
 NEWS_FEEDS = [
@@ -178,10 +213,6 @@ NEWS_FEEDS = [
 NEWS_MAX_ITEMS   = int(os.getenv("NEWS_MAX_ITEMS", "10"))
 NEWS_TIMEOUT_SEC = float(os.getenv("NEWS_TIMEOUT_SEC", "8"))
 
-# 1회 매수 비중 (다회 매수 전제). 하루 최대 노출 = 이 값 × MAX_BUYS_PER_DAY
-# 균형 프로필: 해외 15% × 2회 = 30%, 국내 10% × 2회 = 20%
-BUY_RATIO              = float(os.getenv("BUY_RATIO", "0.15"))
-DOMESTIC_BUY_RATIO     = float(os.getenv("DOMESTIC_BUY_RATIO", "0.10"))
 DIP_THRESHOLD          = float(os.getenv("DIP_THRESHOLD", "-1.5"))
 
 # ── 보조지표 (RSI + 볼린저밴드, 눌림목 매매) ──────────────
@@ -192,6 +223,32 @@ RSI_OVERBOUGHT         = float(os.getenv("RSI_OVERBOUGHT", "70"))   # 이상이�
 BB_PERIOD              = int(os.getenv("BB_PERIOD", "20"))
 BB_NUM_STD             = float(os.getenv("BB_NUM_STD", "2.0"))
 AI_SCORE_FLOOR         = int(os.getenv("AI_SCORE_FLOOR", "-50"))
+
+# ── 포지션 사이징 (T07: 위험 기준) ───────────────────────
+# "총자산 × 비중" 방식은 1주 가격과 무관하게 예산이 정해져, 20만원에서
+# 10% = 2만원 < 1주 2.3만원 → 0주가 됐다(CLAUDE.md "현재 알려진 문제").
+# 이제 **위험 한도와 현금 한도 중 작은 쪽**으로 정수 주 수를 계산한다.
+# 계산은 순수 함수 `sizing.compute_qty` 가 하고, trader 는 결과를 주문에 쓸 뿐이다.
+#
+# **아래 수치는 모두 검증 전 가설이다** (T11 백테스트로 확정).
+# 1회 매매에서 감수할 최대 손실 (자산 대비 %). 손절 시 실제 손실이 이 값을 넘지 않게 수량을 정한다.
+RISK_PER_TRADE_PCT     = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))
+
+# 한 종목에 투입할 수 있는 최대 금액 (자산 대비 %). 위험 기준이 허용해도 이 선을 넘지 않는다.
+MAX_POSITION_PCT       = float(os.getenv("MAX_POSITION_PCT", "45.0"))
+
+# 동시 보유 종목 수 상한. 이 수에 도달하면 신규 진입을 막는다(청산은 계속 동작).
+MAX_OPEN_POSITIONS     = int(os.getenv("MAX_OPEN_POSITIONS", "2"))
+
+# 총 노출(보유 평가액 합계) 상한 (자산 대비 %). 현금이 남아도 이 선을 넘겨 사지 않는다.
+MAX_TOTAL_EXPOSURE_PCT = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT", "90.0"))
+
+# 사용 자본 상한(원). **기본 0 = 상한 없음(실제 계좌 규모 그대로)**.
+# 모의투자 계좌는 가상 1,000만원이라 실전 20만원과 규모가 다르다. 상한을 두면
+# 모의투자에서도 실전과 같은 수량이 나와, 사이징·손절을 실전 규모로 검증할 수 있다.
+# equity 와 cash 를 **둘 다** 이 값으로 제한한다 — 한쪽만 제한하면 남은 현금으로
+# 상한을 넘겨 살 수 있다(sizing.apply_capital_cap 참고).
+CAPITAL_CAP_KRW        = float(os.getenv("CAPITAL_CAP_KRW", "0"))
 
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
 # 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)

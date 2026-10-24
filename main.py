@@ -22,6 +22,7 @@ import config
 import db
 import market_calendar
 import reconcile
+import sizing
 from ai_analyzer import analyze_market_sentiment
 from state import get_bot_state
 from trader import run_trading_cycle
@@ -194,6 +195,73 @@ def job():
     logger.info(f"✅ 매매 사이클 완료\n")
 
 
+def log_capital_summary():
+    """
+    시작 시 "현재 자본 / 살 수 있는 종목 / 못 사는 종목과 필요 자본"을 남긴다 (T07).
+
+    왜 필요한가: 사이징이 "위험 1% / 현금 한도"로 바뀌면서, 자본이 작으면 0주가
+    나와 **주문이 아예 나가지 않는다**. 로그가 없으면 사용자는 봇이 고장 난 줄 알고
+    임계값을 완화하려 든다. 필요한 자본을 함께 보여 주면 "얼마를 넣어야 하는가"를
+    바로 알 수 있다. 규칙을 조용히 완화하지 않는 것이 목적이다.
+
+    자본·시세 조회는 **읽기 전용**이다(주문 없음). 조회 실패는 시작을 막지 않는다 —
+    이 로그가 없어도 매매 안전성에는 영향이 없다.
+    """
+    try:
+        equity = cash = 0.0
+        entries = []      # (ticker, 이름, 1주 가격(원))
+
+        if config.IS_OVERSEAS_ENABLED:
+            try:
+                import kis_overseas
+                bal = kis_overseas.get_balance()
+                equity = max(equity, float(bal.get("total_asset_krw") or 0.0))
+                cash = max(cash, float(bal.get("cash_krw") or 0.0))
+                rate = float(kis_overseas.get_usd_krw_rate() or 0.0)
+                price_usd = float(kis_overseas.get_current_price(config.TARGET_TICKER))
+                entries.append((config.TARGET_TICKER, config.TARGET_TICKER_NAME,
+                                price_usd * rate))
+            except Exception as e:
+                logger.warning(f"[자본 점검] 해외 조회 실패: {e}")
+
+        if config.IS_DOMESTIC_ENABLED:
+            try:
+                import kis_domestic
+                bal = kis_domestic.get_domestic_balance(config.DOMESTIC_TICKER)
+                equity = max(equity, float(bal.get("total_asset_krw") or 0.0))
+                cash = max(cash, float(bal.get("cash_krw") or 0.0))
+                entries.append((config.DOMESTIC_TICKER, config.DOMESTIC_TICKER_NAME,
+                                float(kis_domestic.get_domestic_price(config.DOMESTIC_TICKER))))
+            except Exception as e:
+                logger.warning(f"[자본 점검] 국내 조회 실패: {e}")
+
+        if equity <= 0:
+            logger.warning("[자본 점검] 자본을 조회하지 못해 요약을 건너뜁니다")
+            return
+
+        capped_eq, capped_cash = sizing.apply_capital_cap(equity, cash)
+        if config.CAPITAL_CAP_KRW > 0:
+            logger.info(
+                f"💰 현재 자본 {equity:,.0f}원 → 상한 적용 {capped_eq:,.0f}원 "
+                f"(예수금 {cash:,.0f} → {capped_cash:,.0f}원, CAPITAL_CAP_KRW)"
+            )
+        else:
+            logger.info(f"💰 현재 자본 {equity:,.0f}원 (예수금 {cash:,.0f}원), 자본 상한 없음")
+
+        plans = [sizing.size_entry(t, capped_eq, capped_cash, price, name=name)
+                 for t, name, price in entries]
+        for line in sizing.describe_universe(plans).splitlines():
+            logger.info(f"   {line}")
+        logger.info(
+            f"   규칙: 위험 {config.RISK_PER_TRADE_PCT}% / 포지션 {config.MAX_POSITION_PCT}% "
+            f"/ 동시 {config.MAX_OPEN_POSITIONS}종목 / 총노출 {config.MAX_TOTAL_EXPOSURE_PCT}% "
+            f"— 0주면 주문하지 않습니다(최소 1주 강제 매수 없음)"
+        )
+    except Exception as e:
+        # 이 로그가 실패해도 봇은 계속 돌아야 한다. 다만 조용히 넘기지 않는다.
+        logger.error(f"[자본 점검] 요약 생성 실패: {e}", exc_info=True)
+
+
 def quick_test():
     """퀵 테스트 실행 - 설정 상태 확인 및 샘플 매매"""
     logger.info("=" * 60)
@@ -206,7 +274,15 @@ def quick_test():
     logger.info(f"  - 모의투자: {config.IS_MOCK}")
     logger.info(f"  - 운용 시장: 해외 {'ON' if config.IS_OVERSEAS_ENABLED else 'OFF'}({config.TARGET_TICKER})"
                 f" / 국내 {'ON' if config.IS_DOMESTIC_ENABLED else 'OFF'}({config.DOMESTIC_TICKER})")
-    logger.info(f"  - 1회 매수 비중: 해외 {config.BUY_RATIO} / 국내 {config.DOMESTIC_BUY_RATIO}")
+    # T07: "총자산 × 비중" 대신 위험·현금 한도로 수량을 정한다. 상한(CAPITAL_CAP_KRW)
+    # 이 걸려 있으면 실제 계좌(모의 1,000만원)보다 작은 자본으로 계산된다.
+    cap = config.CAPITAL_CAP_KRW
+    logger.info(
+        f"  - 수량 계산: 위험 {config.RISK_PER_TRADE_PCT}% / 포지션 상한 "
+        f"{config.MAX_POSITION_PCT}% / 동시 {config.MAX_OPEN_POSITIONS}종목 / "
+        f"총노출 {config.MAX_TOTAL_EXPOSURE_PCT}%"
+    )
+    logger.info(f"  - 자본 상한: {cap:,.0f}원" if cap > 0 else "  - 자본 상한: 없음(실제 계좌)")
     logger.info(f"  - DIP 임계값: {config.DIP_THRESHOLD}")
     logger.info(f"  - 하루 최대 매수: {config.MAX_BUYS_PER_DAY}회")
     logger.info(f"  - 목표가 익절: +{config.TAKE_PROFIT_PCT}% (전량)")
@@ -251,6 +327,11 @@ def main():
     # 실전 가드: 위반 시 어떤 API 호출보다 먼저 종료 (T01b)
     config.enforce_trading_mode()
 
+    # 더 이상 읽지 않는 `.env` 이름을 알린다 (T07). **값은 출력하지 않고 이름만**
+    # 남긴다 — 사용자가 "설정했는데 왜 반영이 안 되나"를 헤매지 않게 하려는 것이다.
+    # 경고는 `warn_obsolete_env()` 안에서 한 번만 찍는다(여기서 또 찍으면 중복된다).
+    config.warn_obsolete_env()
+
     # 상태 DB 검증 (T03). 잠김·손상·경로 문제면 **시작을 거부**한다.
     # 상태를 모르는 채 스케줄러를 띄우면 이후 사이클마다 조용히 건너뛰기만 하고,
     # 사용자는 봇이 돌고 있다고 오해한다. 그래서 여기서 즉시 종료한다.
@@ -263,6 +344,9 @@ def main():
 
     env_mode = "모의투자" if config.IS_MOCK else "실전투자"
     logger.info(f"🚀 나스닥 스노우볼 봇 시작 [{env_mode}] — 대상: {config.TARGET_TICKER}")
+
+    # 시작 시 자본·매수 가능 종목 요약 (T07). 읽기 전용 조회이며 실패해도 계속한다.
+    log_capital_summary()
 
     # 시작 즉시 1회 실행
     job()

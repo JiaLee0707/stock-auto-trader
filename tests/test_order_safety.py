@@ -483,12 +483,15 @@ def test_indicator_unavailable_holds_off_buy_but_still_allows_sell(conn, fake_re
         raise ConnectionError("network")
 
     trader._run_cycle(
-        "해외", "QQQ", _cycle_balance(profit=-10.0), 100.0, 0, 0.15,
+        "해외", "QQQ", _cycle_balance(profit=-10.0), 100.0, 0,
         lambda p: f"${p}", sell_fn=None, buy_fn=None,
         fetch_closes=boom_closes, market="overseas",
-        submit_buy=lambda krw: submitted.append("BUY"),
+        submit_buy=lambda qty, price: submitted.append("BUY"),
         submit_sell=lambda reason, qty: submitted.append(("SELL", qty)),
         status_fn=None, cancel_fn=None,
+        # T07: 수량은 사이징이 정한다. 이 테스트는 청산이 계속 동작하는지만 본다.
+        sizing_fn=lambda *a, **kw: sizing.SizingResult(
+            1, "OK", 100.0, detail="테스트"),
     )
     assert ("SELL", 3.0) in submitted, "지표 조회 실패로 손절까지 막혔다"
     assert "BUY" not in submitted, "지표 데이터가 없는데 매수했다"

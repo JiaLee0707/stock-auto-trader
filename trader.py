@@ -32,6 +32,7 @@ import indicators
 import kis_domestic as kd
 import kis_overseas as kis
 import reconcile
+import sizing
 from state import bot_state, get_bot_state
 
 KST = ZoneInfo("Asia/Seoul")
@@ -100,28 +101,74 @@ def _order_price_for(module, price: float, *, side: str) -> float:
     return round(float(price), 2)
 
 
+def _exposure_snapshot(market: str | None, ticker: str,
+                       fx_rate: float = 1.0) -> tuple[int, float]:
+    """
+    신규 진입 판단에 쓸 (보유 종목 수, 현재 총 노출 원화) 를 읽는다 (T07).
+
+    **자기 자신(이번에 사려는 종목)은 세지 않는다** — 이미 보유 중이면 "추가 매수"이고
+    신규 진입이 아니다. 자기 자신을 세면 상한 2종목에서 다른 시장 1종목만 있어도
+    2로 세어 영영 못 산다.
+
+    노출 계산은 `positions.qty × avg_price` 다(원가 기준). 평가금액이 아니라
+    **투입한 돈**을 보는 이유는, 총 노출 상한이 "얼마나 실었는가"를 제한하는
+    규칙이기 때문이다(평가금액은 가격이 오르면 상한을 넘겨 계산된다).
+
+    Args:
+        fx_rate: 해외 포지션의 `avg_price` 는 **달러**이므로 원화로 환산한다.
+            환산하지 않으면 1달러가 1원으로 계산돼 노출이 실제의 1/1,400 이 되고,
+            상한(90%)이 사실상 사라진다.
+
+    T06 이전에는 이 계산 자체가 없었다(노출 상한 미도입) — 비교할 기준선이 없다.
+    """
+    conn = _state_conn()
+    if conn is None:
+        # 이 경로는 DB 미사용(`market is None`) 예전 경로에서만 나온다.
+        # 노출을 모르므로 0(제한 없음)으로 둔다 — 그 경로는 상한을 쓰지 않는다.
+        return 0, 0.0
+
+    rate = float(fx_rate or 1.0)
+    count = 0
+    exposure = 0.0
+    for pos in db.list_positions(conn, status="OPEN"):
+        if (str(pos.get("symbol")) == str(ticker)
+                and str(pos.get("market")) == str(market)):
+            continue      # 자기 자신 — 추가 매수이지 신규 진입이 아니다
+        count += 1
+        try:
+            cost = float(pos.get("qty") or 0.0) * float(pos.get("avg_price") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        exposure += cost * rate if pos.get("market") == MARKET_OVERSEAS else cost
+    return count, exposure
+
+
 class _BudgetProbe:
     """
     `_run_cycle` 이 `buy_fn.get_orderable` 만 쓰는 경우를 위한 자리채움 콜러블 (T04).
 
     T04 부터 실제 주문은 `submit_buy` 가 내므로 `buy_fn` 은 "1주라도 살 수 있는가"
     판단에만 쓰인다. 계좌·DB 를 건드리지 않으므로 안전하다.
+
+    **T07 부터 이 경로는 `market=None`(DB 미사용) 일 때만 쓰인다** — 실제 사이클은
+    `sizing_fn` 이 수량을 정한다. 비중 설정이 사라져 "예산" 개념도 함께 사라졌으므로
+    인자 이름을 `spend_krw` 로 둔다(수량 × 가격).
     """
 
-    def __init__(self, qty_for_budget):
-        self._qty_for_budget = qty_for_budget
+    def __init__(self, qty_for_spend):
+        self._qty_for_spend = qty_for_spend
 
-    def __call__(self, buy_krw: float) -> bool:
-        return self._qty_for_budget(buy_krw) >= 1
+    def __call__(self, spend_krw: float) -> bool:
+        return self._qty_for_spend(spend_krw) >= 1
 
-    def get_orderable(self, budget_krw: float) -> float:
+    def get_orderable(self, spend_krw: float) -> float:
         """해외는 잔고 API 의 통합증거금 값을 신뢰하므로 0(클램핑 없음)을 돌려준다."""
         return 0.0
 
 
-def _budget_probe(qty_for_budget):
+def _budget_probe(qty_for_spend):
     """`_BudgetProbe` 생성 별칭(가독용)."""
-    return _BudgetProbe(qty_for_budget)
+    return _BudgetProbe(qty_for_spend)
 
 
 def _client_ref(market: str, side: str, ticker: str) -> str:
@@ -809,21 +856,30 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
 
 
 def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
-               ai_score: int, ratio: float, price_fmt: str, sell_fn, buy_fn,
+               ai_score: int, price_fmt: str, sell_fn, buy_fn,
                fetch_closes=None, market: str | None = None,
                submit_buy=None, submit_sell=None, status_fn=None, cancel_fn=None,
-               refresh_balance=None, refresh_peak=None, now: datetime | None = None):
+               refresh_balance=None, refresh_peak=None, now: datetime | None = None,
+               sizing_fn=None, fx_rate: float = 1.0):
     """
     해외·국내 공통 매매 사이클 로직.
 
+    T07 에서 `ratio`(1회 매수 비중) 인자를 **없앴다.** 수량은 `sizing_fn` 이 정한다.
+    T07 이전에는 "총자산 × 비중"이었는데, 소액(20만원)에서는 비중 방식이 0주를 내
+    매수 신호가 맞아도 주문이 나가지 않았다(CLAUDE.md "현재 알려진 문제").
+
     Args:
-        ratio: 총자산 대비 1회 매수 비중
         price_fmt: 로그용 가격 포맷 함수
         sell_fn / buy_fn: (수량) / (수량, 가격) 주문 실행 콜러블.
                 T04 부터 실제 주문은 `submit_*` 가 내므로, `buy_fn` 은 예산으로
                 1주라도 살 수 있는지 판단하는 데만 쓰인다(`_BudgetProbe`).
         market: 시장 구분(DB 기록용). None이면 DB 기록을 건너뛰고 예전 경로를 쓴다.
-        submit_buy: (예산) -> order_id. write-ahead 기록 + 전송 (T04)
+        sizing_fn: (equity, cash, price, *, open_positions, current_exposure_krw)
+                -> `sizing.SizingResult`. **T07 신규 — 수량 결정의 유일한 출처다.**
+                주면 `submit_buy(qty, price)` 로 수량을 넘긴다.
+        submit_buy: (수량, 가격) -> order_id. write-ahead 기록 + 전송 (T04).
+                **T07 에서 인자가 "예산"에서 "수량·가격"으로 바뀌었다** —
+                수량 결정이 사이징으로 옮겨 갔으므로 trader 가 다시 계산하지 않는다.
         submit_sell: (사유, 수량) -> order_id. **T06 에서 사유가 추가됐다.**
         status_fn / cancel_fn: 체결 조회 / 미체결 취소 (T04)
         refresh_balance: () -> 잔고 dict. 청산 직전 실제 보유 수량 재확인 (요구사항 5)
@@ -896,7 +952,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
                    refresh_balance=refresh_balance, now=now):
         return
 
-    # ── 매수 ────────────────────────────────────────────
+    # ── 매수 (T07) ──────────────────────────────────────────
     buy_count = bot_state.buy_count_today(ticker)
     if buy_count >= config.MAX_BUYS_PER_DAY:
         logger.info(f"⏩ [{prefix}] 당일 매수 상한 도달 ({buy_count}/{config.MAX_BUYS_PER_DAY}회) — 매수 스킵")
@@ -942,34 +998,60 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         logger.info(f"❌ [{prefix}] 매수 조건 미충족 — 대기")
         return
 
-    # 매수 금액 = 총자산 × 1회 비중, 예수금 한도 내
-    buy_krw = total_krw * ratio
-    buy_krw = min(buy_krw, cash_krw * 0.99)
-
-    if buy_krw <= 0:
-        logger.warning(f"⚠️ [{prefix}] 주문가능금 부족({cash_krw:,.0f}원) — 매수 불가")
+    # ── 수량 결정 (T07: 위험 기준·현금 기준 중 작은 쪽) ────
+    # 예전에는 `총자산 × 비중`이었다. 그 방식은 1주 가격을 보지 않아 자본 20만원 ×
+    # 10% = 2만원 < 1주 23,220원 → **0주**가 됐고, 손절폭도 보지 않아 손절 -3%든
+    # -30%든 같은 수량을 냈다. 이제 수량은 `sizing` 이 정하고 trader 는 그대로 쓴다.
+    if sizing_fn is None:
+        logger.error(f"⛔ [{prefix}] 사이징 함수가 없어 매수를 건너뜁니다")
         return
 
-    # 현금 조회에 지연이 있으므로 실제 주문가능금으로 재확인 (클램핑 역할)
+    # 총 노출·보유 종목 수는 DB(포지션 기록)에서 읽는다. 못 읽으면 매수를 보류한다 —
+    # 노출을 모르는 채로 사면 상한을 넘길 수 있다.
     try:
-        orderable = buy_fn.get_orderable(buy_krw)
-        if orderable > 0:
-            buy_krw = min(buy_krw, orderable)
+        open_positions, exposure_krw = _exposure_snapshot(market, ticker, fx_rate)
     except Exception as e:
-        logger.debug(f"[{prefix}] 주문가능금 재확인 실패, 계산값 사용: {e}")
+        logger.error(f"❌ [{prefix}] 보유·노출 조회 실패 — 매수 보류: {e}")
+        return
+
+    # 상한(CAPITAL_CAP_KRW)을 적용한 자본으로 사이징한다. 모의투자 1,000만원으로
+    # 실전 20만원과 같은 수량이 나오게 하려는 것이다(설정 0 = 상한 없음).
+    capped_total, capped_cash = sizing.apply_capital_cap(total_krw, cash_krw)
+    if (capped_total, capped_cash) != (total_krw, cash_krw):
+        logger.info(
+            f"[{prefix}] 자본 상한 적용: 총자산 {total_krw:,.0f} → {capped_total:,.0f}원, "
+            f"예수금 {cash_krw:,.0f} → {capped_cash:,.0f}원 (CAPITAL_CAP_KRW)"
+        )
+
+    try:
+        plan = sizing_fn(capped_total, capped_cash, current_price,
+                         open_positions=open_positions,
+                         current_exposure_krw=exposure_krw)
+    except Exception as e:
+        # 계산 실패를 "매수 안 함"으로 조용히 삼키지 않는다 — 원인이 설정일 수 있다.
+        logger.error(f"❌ [{prefix}] 수량 계산 실패 — 매수하지 않습니다: {e}")
+        return
+
+    if plan.qty < 1:
+        # **최소 1주를 강제로 사지 않는다.** 위험 한도를 넘기 때문이다.
+        # 대신 왜 못 사는지와 얼마가 더 필요한지를 남겨 사용자가 판단하게 한다.
+        logger.warning(
+            f"⚠️ [{prefix}] 매수하지 않음 — {plan.reason}: {plan.message}\n"
+            f"   1주 필요 자본 약 {plan.required_capital:,.0f}원 | {plan.detail}"
+        )
+        return
 
     logger.info(
         f"🚀 [{prefix}] 매수 실행 ({buy_count + 1}/{config.MAX_BUYS_PER_DAY}회차): "
-        f"예산 {buy_krw:,.0f}원 (총자산의 {ratio * 100:.0f}%)"
+        f"{plan.qty}주 × {current_price:,.0f}원 = {plan.required_capital:,.0f}원 | {plan.detail}"
     )
     if market:
         # T04: 주문은 사전 기록 후 전송하고, **체결이 확인된 뒤에만** 포지션에 반영한다.
-        # `qty`/`current_price` 는 현황 로그와 매수 직전 판단에만 쓰인다.
         if submit_buy is None:
             logger.error(f"⛔ [{prefix}] 주문 제출 경로가 없어 매수를 건너뜁니다")
             return
         try:
-            submit_buy(buy_krw)
+            submit_buy(int(plan.qty), float(current_price))
         except DuplicateOrderBlocked as e:
             logger.warning(f"⏩ [{prefix}] 중복 주문 차단 — {e}")
             return
@@ -979,9 +1061,9 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         bot_state.record_buy(ticker)
         logger.info(
             f"✅ [{prefix}] 매수 주문 접수 — 당일 {bot_state.buy_count_today(ticker)}회차 "
-            f"(포지션은 체결 확인 후 반영)"
+            "(포지션은 체결 확인 후 반영)"
         )
-    elif buy_fn(buy_krw):
+    elif buy_fn(plan.qty * current_price):
         bot_state.record_buy(ticker)
         logger.info(f"✅ [{prefix}] 매수 완료 — 당일 {bot_state.buy_count_today(ticker)}회차")
     else:
@@ -1038,19 +1120,22 @@ def run_overseas_cycle(ai_score: int):
     # 체결 조회가 없으면 주문을 내지 않는다 (T04b).
     _require_settlement_support(kis, "해외")
 
-    def _qty_for_budget(buy_krw: float) -> int:
-        """원화 예산을 달러로 환산한 정수 수량. 0이면 살 수 없다."""
+    def _qty_for_budget(spend_krw: float) -> int:
+        """원화 금액을 달러로 환산한 정수 수량. 0이면 살 수 없다 (`market=None` 경로용)."""
         stock_krw = current_price * rate
-        return int(buy_krw // stock_krw) if stock_krw > 0 else 0
+        return int(spend_krw // stock_krw) if stock_krw > 0 else 0
 
-    def submit_buy(buy_krw: float) -> int:
-        """사전 기록 후 매수 주문을 낸다. 반환: orders.id."""
-        target_qty = _qty_for_budget(buy_krw)
+    def submit_buy(qty: int, price: float) -> int:
+        """
+        사전 기록 후 매수 주문을 낸다. 반환: orders.id.
+
+        **T07: 인자가 "예산"에서 "수량·가격"으로 바뀌었다.** 수량은 `sizing` 이
+        정하고(위험·현금 기준) trader 는 그대로 쓴다 — 여기서 다시 나눗셈하지 않는다.
+        두 곳에서 계산하면 `submit_buy` 가 받은 수량과 실제 주문 수량이 어긋난다.
+        """
+        target_qty = int(qty)
         if target_qty < 1:
-            stock_krw = current_price * rate
-            raise ValueError(
-                f"[해외] 예산({buy_krw:,.0f}원)이 1주 가격({stock_krw:,.0f}원)보다 작습니다"
-            )
+            raise ValueError(f"[해외] 수량이 0 입니다 (qty={qty})")
         order_price = _order_price_for(kis, current_price, side="BUY")
         return _submit_order(
             conn, market=MARKET_OVERSEAS, ticker=ticker, side="BUY", qty=target_qty,
@@ -1085,6 +1170,23 @@ def run_overseas_cycle(ai_score: int):
 
     buy_fn = _budget_probe(_qty_for_budget)
 
+    def sizing_fn(equity_krw: float, cash_krw: float, price_usd: float,
+                  *, open_positions: int = 0,
+                  current_exposure_krw: float = 0.0) -> sizing.SizingResult:
+        """
+        해외 사이징. 사이징은 원화로 계산하므로 **1주 가격을 원화로 환산**해 넘긴다.
+
+        `price` 는 달러이고 `equity/cash` 는 원화다. 환산 없이 넘기면 1주 가격이
+        1400분의 1로 보여 수량이 1,400배로 나온다 — 그러면 위험 한도가 무의미해진다.
+        """
+        price_krw = float(price_usd) * rate
+        stop = sizing.effective_stop_pct(price_krw)
+        return sizing.compute_qty(
+            equity_krw, cash_krw, price_krw, stop, sizing.params_from_config(),
+            open_positions=open_positions,
+            current_exposure_krw=current_exposure_krw,
+        )
+
     balance_norm = {
         "quantity": balance["quantity"],
         "avg_price": balance["avg_price_usd"],
@@ -1094,13 +1196,16 @@ def run_overseas_cycle(ai_score: int):
     }
     _run_cycle(
         "해외", ticker, balance_norm, current_price, ai_score,
-        config.BUY_RATIO, lambda p: f"${p:,.2f}", None, buy_fn,
+        lambda p: f"${p:,.2f}", None, buy_fn,
         lambda: kis.get_daily_closes(ticker),
         market=MARKET_OVERSEAS, submit_buy=submit_buy, submit_sell=submit_sell,
         status_fn=status_fn, cancel_fn=cancel_fn,
         # 청산 직전 실제 보유 수량 재확인 (요구사항 5). 잔고 API 를 다시 부른다.
         refresh_balance=kis.get_balance,
         refresh_peak=lambda: _refresh_peak(conn, ticker, MARKET_OVERSEAS, current_price),
+        sizing_fn=sizing_fn,
+        # 해외 포지션의 avg_price 는 달러다 — 노출 상한을 원화로 계산하려면 환율이 필요하다.
+        fx_rate=rate,
     )
 
 
@@ -1111,16 +1216,15 @@ def run_domestic_cycle(ai_score: int):
     current_price = kd.get_domestic_price(ticker)
     conn = _state_conn()
 
-    def _qty_for_budget(buy_krw: float) -> int:
-        return int(buy_krw // current_price) if current_price > 0 else 0
+    def _qty_for_budget(spend_krw: float) -> int:
+        """`market=None` 경로용 (DB 미사용). 실제 사이클은 `sizing_fn` 이 정한다."""
+        return int(spend_krw // current_price) if current_price > 0 else 0
 
-    def submit_buy(buy_krw: float) -> int:
-        """사전 기록 후 매수 주문을 낸다. 반환: orders.id."""
-        target_qty = _qty_for_budget(buy_krw)
+    def submit_buy(qty: int, price: float) -> int:
+        """사전 기록 후 매수 주문을 낸다. 반환: orders.id. **T07: (수량, 가격)**."""
+        target_qty = int(qty)
         if target_qty < 1:
-            raise ValueError(
-                f"[국내] 예산({buy_krw:,.0f}원)이 1주 가격({current_price:,.0f}원)보다 작습니다"
-            )
+            raise ValueError(f"[국내] 수량이 0 입니다 (qty={qty})")
         body = kd.order_body(ticker, target_qty, current_price, side="BUY")
         return _submit_order(
             conn, market=MARKET_DOMESTIC, ticker=ticker, side="BUY", qty=target_qty,
@@ -1155,7 +1259,24 @@ def run_domestic_cycle(ai_score: int):
         return kd.cancel_order("", quantity=int(qty), ticker=ticker)
 
     buy_fn = _budget_probe(_qty_for_budget)
-    buy_fn.get_orderable = lambda budget: kd.get_orderable_cash(ticker, current_price)
+
+    def sizing_fn(equity_krw: float, cash_krw: float, price_krw: float,
+                  *, open_positions: int = 0,
+                  current_exposure_krw: float = 0.0) -> sizing.SizingResult:
+        """
+        국내 사이징. 국내는 가격이 이미 원화라 환산이 필요 없다.
+
+        ATR 은 넘기지 않는다(`None`) — 일봉 OHLC 조회가 미구현이라 ATR 값의 출처가
+        없다(`history.kis_rows_to_bars` NotImplementedError). `STOP_LOSS_ATR_MULT`
+        가 0(기본)이므로 고정 `STOP_LOSS_PCT` 가 쓰인다.
+        # VERIFY: 일봉 OHLC 를 확보하면 ATR 기반 손절폭을 넘겨야 한다(T06 보고 참고).
+        """
+        stop = sizing.effective_stop_pct(price_krw)
+        return sizing.compute_qty(
+            equity_krw, cash_krw, price_krw, stop, sizing.params_from_config(),
+            open_positions=open_positions,
+            current_exposure_krw=current_exposure_krw,
+        )
 
     balance_norm = {
         "quantity": balance["quantity"],
@@ -1166,11 +1287,12 @@ def run_domestic_cycle(ai_score: int):
     }
     _run_cycle(
         "국내", ticker, balance_norm, current_price, ai_score,
-        config.DOMESTIC_BUY_RATIO, lambda p: f"{p:,.0f}원", None, buy_fn,
+        lambda p: f"{p:,.0f}원", None, buy_fn,
         lambda: kd.get_daily_closes(ticker),
         market=MARKET_DOMESTIC, submit_buy=submit_buy, submit_sell=submit_sell,
         status_fn=status_fn, cancel_fn=cancel_fn,
         # 청산 직전 실제 보유 수량 재확인 (요구사항 5). 잔고 API 를 다시 부른다.
         refresh_balance=lambda: kd.get_domestic_balance(ticker),
         refresh_peak=lambda: _refresh_peak(conn, ticker, MARKET_DOMESTIC, current_price),
+        sizing_fn=sizing_fn,
     )

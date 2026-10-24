@@ -1893,3 +1893,245 @@ $ .venv/bin/python -m pytest -q
 - **`main.py` 는 이번 Task 에서도 실행하지 않았다.** 실제 모의투자 1회 실행으로
   `orders.reason` 이 채워지는지, 브로커 재조회가 정상인지, 시장가 청산이 체결되는지
   확인하는 것이 다음 단계다.
+
+---
+
+# T07 — 포지션 사이징 (소액 대응) (2026-10-23)
+
+## 1. 완료 여부
+
+**완료.** 요구사항 1~9 전부 반영. 판단(진입 신호·청산 규칙)은 손대지 않았고,
+바꾼 것은 **"몇 주를 살지"** 뿐이다.
+
+| # | 요구사항 | 상태 |
+|---|---|---|
+| 1 | `sizing.py` 순수 함수 `compute_qty` | **완료** |
+| 2 | 손절폭은 T06 `STOP_LOSS_PCT` 에서 (ATR 0 이면 고정 %) | **완료** (`sizing.effective_stop_pct` → `exit_rules.effective_stop_loss_pct` 위임) |
+| 3 | `CAPITAL_CAP_KRW` 추가 (equity·cash 둘 다 제한) | **완료** |
+| 4 | 시작 시 자본·매수 가능/불가 종목 로그 | **완료** (`main.log_capital_summary`) |
+| 5 | 옛 설정 이름 경고 (값 미출력) | **완료** (`config.warn_obsolete_env`) |
+| 6 | qty 0 이면 주문 금지 + 필요 자본 로그 | **완료** (`trader._run_cycle` 매수 블록) |
+| 7 | 비중 설정(BUY_RATIO 등) 삭제 + grep | **완료** (아래 5절) |
+| 8 | 특성화 테스트 먼저, 변경 후 차이 목록 | **완료** (아래 6·7절) |
+| 9 | 별도: `DOMESTIC_TICKER_NAME` 정정 | **완료** (아래 9절) |
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 |
+|---|---|
+| `sizing.py` **신규(347줄)** | 순수 함수만. `compute_qty` · `apply_capital_cap` · `effective_stop_pct` · `params_from_config` · `size_entry` · `describe_universe`. I/O 없음 |
+| `trader.py` | `_run_cycle` 에서 `ratio` 인자 **삭제**, `sizing_fn`·`fx_rate` 추가. `_exposure_snapshot()` 신규(보유 종목 수·총 노출 원화). `_BudgetProbe` 인자명 `buy_krw`→`spend_krw`. 매수 블록이 `plan.qty` 를 그대로 쓴다 |
+| `config.py` | T07 사이징 5종(`RISK_PER_TRADE_PCT`·`MAX_POSITION_PCT`·`MAX_OPEN_POSITIONS`·`MAX_TOTAL_EXPOSURE_PCT`·`CAPITAL_CAP_KRW`). `OBSOLETE_ENV_NAMES` + `warn_obsolete_env()`. `BUY_RATIO`·`DOMESTIC_BUY_RATIO` **삭제**. `DOMESTIC_TICKER_NAME` 정정 |
+| `main.py` | `log_capital_summary()` 신규 — 시작 시 자본·가능/불가 종목·필요 자본. `warn_obsolete_env()` 호출. `quick_test()` 에 사이징 규칙 표시 |
+| `db.py` | `config_hash()` 에서 `buy_ratio`/`domestic_buy_ratio` 를 T07 5종으로 교체 (기존 컬럼은 삭제하지 않음) |
+| `README.md` | 환경변수 표: 비중 2행 삭제, 사이징 5행 추가. `DOMESTIC_TICKER_NAME` 정정 |
+| `CLAUDE.md` | 전략 표 "T06·T07에서 코드에 반영됨"으로 갱신. 사이징 절 추가. "알려진 문제"의 비중 10% 항목 해결 표시 |
+| `tests/test_sizing.py` **신규** | 38개 (특성화 5 + 신규 33) |
+
+### 사이징 공식 (`sizing.compute_qty`)
+
+```
+risk_budget   = equity × RISK_PER_TRADE_PCT/100
+stop_distance = entry_price × |effective_stop_pct|/100
+qty_by_risk   = floor(risk_budget / stop_distance)
+qty_by_cash   = floor(min(cash, equity × MAX_POSITION_PCT/100) / entry_price)
+qty           = min(qty_by_risk, qty_by_cash)        # ← 작은 쪽
+```
+
+거부 사유(주문 안 냄): `INSUFFICIENT_CAPITAL` / `INVALID_INPUT` / `INVALID_STOP` /
+`MAX_POSITIONS_REACHED` / `EXPOSURE_LIMIT`.
+
+## 3. 요구사항 3의 계산 표 (자본 20만원 / 1주 23,220원 / 손절 -3%)
+
+`.venv/bin/python -c "import sizing; ..."` 로 실제 실행한 값이다(추정 아님).
+
+| 자본 | 현금 | 손절폭 | 위험예산 | 1주당 위험 | **위험 기준 수량** | 가용금액 | **현금 기준 수량** | 최종 | 투입 금액 | 사유 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 200,000 | 200,000 | -3% (696.60원) | 2,000원 | 696.60원 | **2주** | 90,000원 (45%) | **3주** | **2주** | **46,440원** | OK |
+| 1,000,000 | 1,000,000 | -3% | 10,000원 | 696.60원 | **14주** | 450,000원 | **19주** | **14주** | **325,080원** | OK |
+| 1,000,000 | 200,000 | -3% | 10,000원 | 696.60원 | 14주 | 200,000원 (현금) | **8주** | **8주** | **185,760원** | OK |
+| 400,000 | 400,000 | -3% | 4,000원 | 696.60원 | **5주** | 180,000원 | 7주 | **5주** | **116,100원** | OK |
+| 60,000 | 60,000 | -3% | 600원 | 696.60원 | **0주** | 27,000원 | 1주 | **0주** | — | `INSUFFICIENT_CAPITAL`, 필요 자본 **69,660원** |
+| 200,000 | 200,000 | -3% | — | — | — | — | — | **0주** | — | `MAX_POSITIONS_REACHED` (보유 2 ≥ 상한 2), 필요 자본 23,220원 |
+
+**변경 전(T06)과 비교**: 같은 조건에서 비중 방식은 `200,000 × 10% = 20,000원 < 23,220원`
+→ **0주**였다(특성화 테스트 `test_200k_with_10pct_ratio_buys_zero_shares`).
+이제는 **2주**가 나간다. 단, 위험 예산(2,000원)이 1주 손절 위험(696.60원)의 3배에
+못 미치므로 **여전히 3주는 못 산다** — 규칙을 완화한 것이 아니라 계산 기준을 바꾼 것이다.
+
+## 4. 시작 로그 (요구사항 4)
+
+`main.log_capital_summary()` 가 시작 시 **읽기 전용 조회**로 다음을 찍는다(주문 없음,
+조회 실패해도 시작을 막지 않음). 실제 출력 형식:
+
+```
+💰 현재 자본 9,900,000원 (예수금 9,900,000원), 자본 상한 없음     # 상한 설정 시 다른 줄
+   매수 가능 1종목: 379800(KODEX 미국S&P500TR) 23,220원 → 142주
+   매수 불가 1종목: QQQ(QQQ) 800,000원 → 0주(자본 부족 — 1주를 사려면 자본이 더 필요합니다) 필요 2,400,000원
+   규칙: 위험 1.0% / 포지션 45.0% / 동시 2종목 / 총노출 90.0% — 0주면 주문하지 않습니다(최소 1주 강제 매수 없음)
+```
+
+(위 `매수 가능`/`매수 불가` 두 줄은 `sizing.describe_universe` 의 **실제 출력**이다.)
+
+`CAPITAL_CAP_KRW>0` 이면 `현재 자본 X원 → 상한 적용 Y원 (예수금 … CAPITAL_CAP_KRW)`
+줄이 추가로 찍힌다.
+
+## 5. 비중 설정 삭제 — grep 결과
+
+```
+$ grep -rn "BUY_RATIO\|DOMESTIC_BUY_RATIO" --include='*.py' --include='*.md' . \
+    | grep -v docs/archive | grep -v docs/CHANGES.md
+db.py:325:        # T07: 비중 방식(BUY_RATIO/DOMESTIC_BUY_RATIO)을 폐기하고 위험 기준 사이징으로
+config.py:22:    "BUY_RATIO": "T07 에서 삭제(비중 방식 폐기)...          ← 옛 이름 경고 목록(문자열)
+config.py:23:    "DOMESTIC_BUY_RATIO": "T07 에서 삭제..."              ← 옛 이름 경고 목록(문자열)
+CLAUDE.md:53:  utils.py는 자체 기본값(BUY_RATIO=0.30, ...) 을 보유      ← 미사용 파일 경고(기존)
+CLAUDE.md:92:  기존 비중 방식(BUY_RATIO/DOMESTIC_BUY_RATIO)은 삭제했습니다  ← T07 설명
+tests/test_sizing.py:365-366, 417:                        ← 삭제를 고정하는 테스트
+docs/DEVELOPMENT.md:93:  utils.py ... 낡은 설정명(BUY_RATIO 기본값 0.30)     ← 미사용 파일 경고(기존)
+```
+
+**`config.BUY_RATIO` / `config.DOMESTIC_BUY_RATIO` 상수는 없어졌고, 매매 경로에서
+참조하는 코드는 0건이다.** 남은 것은 (a) 옛 이름 경고용 문자열, (b) 삭제를 고정하는
+테스트, (c) **미사용 파일 `utils.py` 를 경고하는 기존 문서**뿐이다.
+`utils.py` 는 실행 경로에서 import 되지 않지만 자체 `BUY_RATIO=0.30` 을 들고 있다 —
+삭제 여부는 여전히 사용자 결정 사항이다(T00부터 미결).
+
+## 6. 특성화 테스트 (변경 전 동작 고정)
+
+`tests/test_sizing.py::TestCharacterization` — 5개. T06 까지의 계산을 **테스트 안에
+그대로 적어 두었다**(`_legacy_budget`/`_legacy_qty`).
+
+| 테스트 | 고정한 사실 |
+|---|---|
+| `test_200k_with_10pct_ratio_buys_zero_shares` | 20만원 × 10% = 2만원 < 23,220원 → **0주** (핵심 결함) |
+| `test_200k_with_15pct_ratio_buys_zero_shares` | 15%(3만원)면 **1주**만 |
+| `test_budget_ignores_stop_distance` | 비중 방식은 손절폭을 보지 않는다 |
+| `test_cash_is_clamped_to_99_percent` | 예산 상한은 예수금 × 0.99 |
+| `test_overseas_budget_converts_by_fx_rate` | 해외는 원화 예산 → 달러 환산 후 수량 |
+
+## 7. 변경 후 달라진 동작 (목록)
+
+| # | T06 까지 | T07 이후 |
+|---|---|---|
+| 1 | `총자산 × 비중`(해외 15%/국내 10%)이 예산 | 위험 기준·현금 기준 중 **작은 쪽** |
+| 2 | 손절폭을 보지 않음 (손절 -3%든 -30%든 같은 수량) | 손절폭에 **반비례** (`|손절%|` 가 2배면 수량 절반) |
+| 3 | 자본 20만원·국내 → **0주** | **2주** |
+| 4 | 해외/국내 비중이 달라 같은 자본에도 수량이 달랐음 | 두 시장이 **같은 규칙** |
+| 5 | 동시 보유 종목 수 상한 **없음** | `MAX_OPEN_POSITIONS=2` 초과 시 신규 진입 차단 |
+| 6 | 총 노출 상한 **없음** | `MAX_TOTAL_EXPOSURE_PCT=90%` — 현금이 남아도 이 선을 못 넘김 |
+| 7 | 1종목 최대 투입 상한 없음(비중이 사실상 그 역할) | `MAX_POSITION_PCT=45%` |
+| 8 | 모의투자 1,000만원 규모로 수량 계산 | `CAPITAL_CAP_KRW` 설정 시 **실전 규모(20만원)** 로 계산 (기본 0=상한 없음) |
+| 9 | `_run_cycle(..., ratio, ...)` | `ratio` 제거, `sizing_fn` 추가 |
+| 10 | `submit_buy(예산_krw)` | `submit_buy(qty, price)` — **수량은 사이징이 정하고 trader 가 바꾸지 않는다** |
+| 11 | ATR 손절을 켜도 수량 불변 | ATR 손절을 켜면 손절폭이 넓어져 **수량이 자동으로 줄어든다** |
+| 12 | 옛 `.env` 이름을 조용히 무시 | 시작 시 이름만 경고(`warn_obsolete_env`) |
+| 13 | 시작 로그에 자본 요약 없음 | 자본·가능/불가 종목·필요 자본 출력 |
+| 14 | 0주면 `개수 부족` 로그만 | `INSUFFICIENT_CAPITAL` + **필요 자본** + 상세 사유 |
+| 15 | `config_hash()` 에 `buy_ratio`/`domestic_buy_ratio` | T07 5종으로 교체 (기존 값과 지문이 달라져 과거 주문과 구분됨) |
+
+**바뀌지 않은 것**: 진입 신호(RSI·볼린저·AI·딥), 청산 규칙(`exit_rules.evaluate_exit`),
+`config.assert_order_allowed()`, T03 EXTERNAL 매도 차단, 주문 API 자동 재시도 금지,
+`MAX_BUYS_PER_DAY`/`MIN_BUY_INTERVAL_HOURS` 분할 매수 규칙.
+
+## 8. 테스트 결과
+
+```
+$ .venv/bin/python -m pytest
+503 passed in 4.82s
+```
+
+| 파일 | 개수 | 내용 |
+|---|---|---|
+| `tests/test_sizing.py` (신규) | **38** | 특성화 5 / 완료 기준 표 3 / 위험·현금·노출·상한 경계 20 / 손절폭 입력 4 / 순수성 1 / 옛 이름 경고 3 / trader 배선 4 |
+
+완료 기준 5가지를 모두 덮었다: (자본 20만원·1주 23,220원·손절 -3%) 표,
+(자본 100만원) 표, `qty_by_risk=0`, 현금 부족, 최대 보유 초과.
+
+`test_compute_qty_does_no_io` 는 `db.get_position`·`db.open_db`·`state.get_bot_state` 를
+예외로 바꿔 놓고 `compute_qty` 를 호출한다 — 순수 함수임을 코드로 고정했다.
+`test_trader_has_no_buy_ratio_code` 는 `inspect.getsource(trader)` 로 `BUY_RATIO`·
+`DOMESTIC_BUY_RATIO`·`total_krw * ratio`·`buy_krw` 부재를 검사한다(grep 대신 테스트).
+
+`main.py` 는 이번 Task 에서도 **한 번도 실행하지 않았다.** 실제 모의 API 도 호출하지 않았다.
+
+## 9. 별도 항목 — `DOMESTIC_TICKER_NAME` 정정
+
+`config.py` 기본값 `TIGER 미국나스닥100` → **`KODEX 미국S&P500TR`** 로 정정하고,
+코드에 정정 사유를 주석으로 남겼다(나스닥100 ETF 는 **379810**). **매매 동작은 불변** —
+`DOMESTIC_TICKER`(379800)는 그대로이고 이름 문자열만 바뀌었다.
+
+| 위치 | 조치 |
+|---|---|
+| `config.py:203` | 기본값 정정 + 정정 주석 |
+| `README.md:52` | 표 이미 `KODEX 미국S&P500TR` |
+| `docs/DEVELOPMENT.md`·`TROUBLESHOOTING.md`·`manual_checks.md` | 379800/나스닥100 서술 **없음** (고칠 곳 없음) |
+| `docs/CHANGES.md:569` | T00 시점 기록표 — **과거 기록이므로 고치지 않음** |
+| `docs/archive/` | 제외 (요구사항) |
+
+## 10. 확인하지 못한 항목 (`# VERIFY`)
+
+1. **`RISK_PER_TRADE_PCT=1.0`·`MAX_POSITION_PCT=45`·`MAX_OPEN_POSITIONS=2`·
+   `MAX_TOTAL_EXPOSURE_PCT=90` 은 모두 검증 전 가설이다.** 근거는 "자산 1% 위험"이라는
+   통념과 20만원에서 1주 이상 나오게 하는 제약뿐이다. T11 백테스트로 확정해야 한다.
+2. **`MAX_POSITION_PCT=45` 는 20만원에서 3주가 아니라 2주만 사게 만든다** (위험 기준이
+   먼저 걸린다). 현금 기준 상한이라 20만원에서는 사실상 **한 번도 걸리지 않는다** —
+   실전 규모에서는 죽은 설정일 수 있다. T11에서 자본별로 확인 필요.
+3. **해외 1주 가격 환산에 `get_usd_krw_rate()` 를 쓴다.** 이 환율이 매수 시점의 실제
+   적용 환율과 다르면 수량이 어긋난다. 환전 수수료·슬리피지는 **전혀 반영하지 않았다.**
+4. **수수료·세금을 수량 계산에 넣지 않았다.** `test_cash_is_clamped_to_99_percent` 가
+   보여 주듯 T06 까지는 예수금 × 0.99 로 1% 여유를 뒀는데, **T07 의 `qty_by_cash` 에는
+   그 여유가 없다** (`min(cash, …)/price`). 예수금을 꽉 채워 사면 수수료만큼 초과할 수
+   있다. → **의도적 미반영이며 사용자 결정 필요** (아래 11절 질문 1).
+5. **총 노출을 원가(`qty × avg_price`)로 계산한다.** 평가금액이 오르면 실제 노출은
+   상한을 넘을 수 있다. "얼마나 실었는가"를 보려는 선택이지만 검증 전이다.
+6. **`_exposure_snapshot` 은 자기 종목을 제외한다**(추가 매수는 신규 진입이 아니므로).
+   이 때문에 한 종목을 계속 추가 매수하면 노출 상한만 남고 종목 수 상한은 안 걸린다.
+   `MAX_BUYS_PER_DAY=2` 가 막아 주지만, 두 규칙의 상호작용은 검증되지 않았다.
+7. **`CAPITAL_CAP_KRW` 는 표시·계산만 제한하고 실제 주문 여력을 제한하지 않는다.**
+   시장가 청산은 상한과 무관하게 전량 매도된다(의도). 다만 상한이 실제 예수금보다
+   크게 설정되면 아무 효과가 없고, 작게 설정하면 손절 후 재진입이 계속 상한 안에서만
+   일어난다 — 실전 전환 시 재검토 필요.
+8. **`utils.py` 의 `BUY_RATIO=0.30` 은 그대로 남아 있다.** 실행 경로에서 import 되지
+   않아 무해하지만, 삭제 여부는 T00부터 미결이다.
+9. **`main.py` 의 `log_capital_summary()` 는 실행해 보지 않았다.** 조회 실패 시
+   경고만 찍고 계속하는지, `describe_universe` 출력이 읽기 좋은지는 실제 실행 필요.
+10. **`db.config_hash()` 가 바뀌어 기존 주문 행과 지문이 달라진다.** 기존 데이터와의
+    비교·집계 스크립트가 있다면 깨진다(현재는 없음).
+
+## 11. 사용자가 결정해야 할 질문
+
+1. **수수료·세금 여유를 수량 계산에 넣을까요?** 지금은 `qty_by_cash` 가 예수금을 꽉
+   채워 계산합니다(20만원 → 3주까지 가능하나 위험 기준이 2주로 막음). 예수금이 딱
+   맞는 경우 수수료만큼 초과 주문이 날 수 있습니다. T06 이전의 ×0.99 여유를 되살릴까요?
+2. **`RISK_PER_TRADE_PCT=1.0%` 로 확정해도 될까요?** 20만원에서 손절 시 1회 손실
+   2,000원, 20회 연속 손절이면 자본의 20%가 사라집니다. 소액에서는 2~3%가 현실적이라는
+   의견도 있습니다 — 다만 이는 **검증 전 가설 조정**이므로 T11 전에는 바꾸지 않는 것을
+   권합니다.
+3. **`CAPITAL_CAP_KRW=200000` 을 모의투자에 설정할까요?** 설정하면 모의투자에서 실전과
+   같은 수량(2주)이 나와 사이징·손절을 실전 규모로 검증할 수 있습니다. 다만 모의투자
+   계좌에 1,000만원이 있어도 봇은 20만원짜리로만 행동합니다.
+4. **`MAX_POSITION_PCT=45%` 는 20만원에서 한 번도 걸리지 않습니다.** 이 설정을 남길지,
+   실전 자본 기준으로 다시 정할지 결정이 필요합니다.
+5. **동시 보유 2종목 상한을 지금 켤까요?** 현재 유니버스가 QQQ·379800 2종목이라 상한
+   2는 사실상 제한이 없습니다. 유니버스를 늘리기 전까지는 차이가 없습니다.
+6. **`utils.py`·`trading_strategy.py` 를 삭제할까요?** 여전히 미결입니다. `utils.py` 는
+   삭제된 `BUY_RATIO` 를 자체 보유해 혼동을 유발할 수 있습니다.
+7. **총 노출을 원가 기준으로 둘까요, 평가금액 기준으로 바꿀까요?** 원가는 "얼마
+   실었나", 평가금액은 "지금 얼마인가"를 봅니다. 상한의 목적에 따라 답이 달라집니다.
+
+## 12. 다음 Task에 영향을 주는 사항
+
+- **`_run_cycle` 시그니처가 또 바뀌었다**(`ratio` 제거, `sizing_fn`·`fx_rate` 추가).
+  `tests/test_order_safety.py` 도 함께 고쳤다 — 이후 Task 에서 이 함수를 호출하는
+  테스트를 쓸 때 `sizing_fn` 을 넘기지 않으면 **매수가 조용히 건너뛰어진다**(로그 ERROR).
+- **수량의 유일한 출처는 `sizing.py` 다.** 청산 규칙(T09 이후)·백테스트(T11)에서도
+  수량이 필요하면 `sizing.compute_qty` 를 재사용해야 한다 — 두 곳에서 따로 계산하면
+  백테스트와 실전이 어긋난다(CLAUDE.md "백테스트와 실전 판단 로직이 별개일 가능성").
+- **백테스트(T11)는 `CAPITAL_CAP_KRW` 를 반드시 명시**해야 한다. 1,000만원 기본값으로
+  돌리면 실전 20만원과 다른 결론이 나온다.
+- **`config_hash()` 가 바뀌었다** — 과거 주문과 지문이 다르다.
+- **T11 에서 확정할 것**: `RISK_PER_TRADE_PCT`, `MAX_POSITION_PCT`,
+  `MAX_TOTAL_EXPOSURE_PCT`, 수수료 여유 반영 여부, 총 노출 기준(원가/평가).
+- **`cancel_order` 미구현(T04b)은 여전하다.** 청산 주문 유형(T06)에 영향.
+- **`main.py` 는 이번 Task 에서도 실행하지 않았다.** 실제 모의투자 1회 실행으로
+  `log_capital_summary()` 출력·`sizing` 실동작·주문 수량을 확인하는 것이 다음 단계다.
