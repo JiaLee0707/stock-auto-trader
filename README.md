@@ -9,8 +9,38 @@ macOS 로컬에서 `schedule`로 1시간 주기 실행.
 
 - 매도 체결이 **한 번도 발생한 적이 없음** — 익절/손절 로직이 실제로 발동한 실적 없음
 - 이 사실은 `logs/bot.log`로 확인 가능. 2026-10-18 기준 "매도"가 들어간 줄 39건 중 13건이 `매도 조건 미충족`이고, 매도 주문 실행 기록은 0건이다 (`grep -cE "매도 주문 완료" logs/bot.log` → 0, 매수 주문 완료는 9건)
-- 자동화 테스트는 **T01에서 최소 도입** (pytest, `tests/`, 37개). 지표 특성화와 실전 가드만 덮으며 매매 판단 전체를 검증하지는 않음
+- 자동화 테스트는 **T01에서 최소 도입** (pytest). 지표 특성화·실전 가드에서 시작해 T08에서 판단 로직 전체(`tests/test_decide.py`)로 넓어짐
 - 실전 가드가 **T01/T01b에서 추가됨**. `IS_MOCK_TRADING=false`(실전)이고 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면 시작 즉시 종료하며, 주문 함수 4개도 직접 호출 시 차단 (`tests/test_live_guard.py`)
+
+## 판단과 실행의 분리 (T08)
+
+**매매 판단은 `strategy.decide()` 하나이며, 순수 함수입니다** — I/O·시간 조회·DB 접근이 없습니다.
+`trader.py` 는 오케스트레이션만 합니다: 데이터 수집 → `decide()` → 주문 → DB 갱신.
+목적은 **백테스트와 실전이 같은 판단 함수를 쓰게** 하는 것입니다.
+
+```
+config/설정 ──┐
+확정 일봉 ────┼→ MarketSnapshot ─┐
+브로커 잔고 ──┼→ AccountView    ─┼→ strategy.decide() ─→ Decision ─→ trader (주문·DB)
+상태 DB ──────┴→ PositionView/DayCounters ─┘   (순수)                      (부작용)
+```
+
+부작용이 있는 안전장치들은 **일부러 `decide()` 밖에** 둡니다 — 주문 함수의
+`config.assert_order_allowed()` 실전 가드, `EXTERNAL` 매도 차단, 주문 직전 중복 확인,
+주문 직전 브로커 잔고 재확인입니다. 이들을 판단 함수로 끌어오면 조회 실패 시
+"모르는 값을 판단 입력으로" 넣게 됩니다.
+
+### 동작이 바뀐 부분: 지표는 **확정 봉**만 씁니다
+
+판단에 쓰는 종가는 **전일까지의 확정 종가**입니다(`history.get_confirmed_bars`, T02).
+**장중에 형성 중인 당일 봉은 신호에 들어가지 않습니다.** T07까지는 KIS 일봉(당일 봉 포함)을
+그대로 썼기 때문에, 오전에 매수 조건이 충족됐다가 그 봉이 다시 그려지면서 오후에
+미충족으로 뒤집힐 수 있었습니다. 이제 판단은 하루 동안 고정되고 **주문만** 장중에 나갑니다.
+
+백테스트의 체결 가정은 `BACKTEST_FILL_MODEL`(기본 `next_open`)로 명시합니다 —
+"전일 확정 종가로 신호를 내고 다음 거래일 시가에 체결된다"는 가정입니다.
+실전은 신호가 나온 사이클의 장중 가격으로 주문하므로, 이 차이를 백테스트 결과에
+적용할 때 반드시 고려해야 합니다.
 
 상세한 배경과 근거는 [docs/archive/REVIEW_PROMPT.md](docs/archive/REVIEW_PROMPT.md) 참고.
 
@@ -80,13 +110,17 @@ Python 버전: `.python-version` = `3.12.15`
 | `EXIT_ORDER_TYPE_TRAILING` | `market` | 〃 (T06) |
 | `EXIT_ORDER_TYPE_OVERBOUGHT` | `market` | 〃 (T06) |
 | `AI_SCORE_FLOOR` | `-50` | 매수 허용 최소 AI 점수 |
-| `MAX_BUYS_PER_DAY` | `2` | 종목당 하루 최대 매수 횟수 |
+| `AI_FILTER_ENABLED` | `true` | AI 점수 필터 사용 여부 (T08). `true` = 현재 동작 유지. `false`면 점수를 못 받아도 매수. **T10에서 기본값 변경 예정** |
+| `ENTRY_TREND_FILTER_ENABLED` | `false` | 진입 추세 필터(종가 > SMA) 사용 여부 (T08). 켜져 있는데 SMA를 계산할 수 없으면 **매수 보류** |
+| `ENTRY_TREND_SMA_PERIOD` | `200` | 추세 필터의 SMA 기간 (T08) |
+| `MAX_BUYS_PER_DAY` | `2` | 종목당 하루 최대 매수 횟수. **`0`이면 신규 매수 전면 차단** |
 | `MIN_BUY_INTERVAL_HOURS` | `2.0` | 직전 매수 후 최소 대기(시간), 2회차부터 |
 | `ORDER_TYPE` | `limit` | **매수** 주문 유형 기본값. 청산은 사유별 `EXIT_ORDER_TYPE_*` 가 우선 (T04/T06) |
 | `DB_PATH` | `data/bot.db` | 상태 SQLite 경로 (T03) |
 | `RECONCILE_AUTOFIX` | `false` | 브로커↔DB 불일치 시 자동 보정 여부. 기본은 보정 없이 **매매 중단**만 (T03) |
 | `ORDER_PRICE_TICKS` | `1` | 지정가를 현재가에서 몇 호가 옮길지. 매수 +N틱, 매도 −N틱. `0`이면 현재가 그대로 (T04) |
 | `ORDER_TIMEOUT_MINUTES` | `30` | 미체결 주문을 이 시간까지 기다렸다가 취소 (T04) |
+| `BACKTEST_FILL_MODEL` | `next_open` | 백테스트 체결 가정 (T08). `next_open`(신호 다음 거래일 시가) / `close` / `next_close`. 실전 판단에는 쓰이지 않음 |
 
 `IS_MOCK_TRADING` 값에 따라 KIS 도메인, 키, 토큰 캐시 파일이 자동 전환됩니다.
 - 모의투자: `https://openapivts.koreainvestment.com:29443`, 캐시 `token_cache_mock.json`

@@ -739,6 +739,40 @@ uritemplate==4.2.0                     wheel==0.48.0
 
 ---
 
+# T08 후속 점검 (2026-10-24)
+
+**완료 상태:** 완료
+
+**변경 사항:** `trader.py`, `broker.py`, `models.py` 파일 변경 없음 — 단지 보고서만 작성됨.
+
+**주요 내용:**
+1. **트레이더의 브로커 인터페이스(`broker_module.for_market`) 사용에 대한 분석**(T08 작업 지침 1).
+2. **노출 조회 실패(`_exposure_snapshot`) 시 처리 방식에 대한 분석**(T08 작업 지침 2). 매수만 보류하고 청산은 지속하는 쪽으로 변경 필요.
+3. **테스트 시나리오**(T08 작업 지침 2). 매수 보류, 손절 정상 발동, CRITICAL 로그.
+4. **트레이더 라인 557의 "전역 중단을 쓰지 않는다" 주석과 관계**에 대한 설명.
+5. **보고서 331이 나온 숫자 이유**(T08 작업 지침 2). `ReportFindings` 로그를 시뮬레이션하기 위한 결과.
+
+---
+
+# T08 후속 점검 (2026-10-24)
+
+**완료 상태:** 완료
+
+**변경 사항:** `trader.py`, `broker.py`, `models.py` 파일 변경 없음 — 단지 보고서만 작성됨.
+
+**주요 내용:**
+1. **트레이더의 브로커 인터페이스(`broker_module.for_market`) 사용에 대한 분석**(T08 작업 지침 1). trader.py 1336과 1413줄에서 호출하는 것을 확인했습니다. broker.py의 공개 함수(공개 함수 목록)와 추적해야 할 순서: `config.assert_order_allowed()`, `T04` 주문 직전 중복 확인(`db.has_open_order`), `T03` `EXTERNAL` 가드(`reconcile.halt_trading`), `T06` 브로커 잔고 재확인(`_confirm_sell_quantity`). 이 방어선들은 원래 트레이더에서 사용하는 것과 동일한 강도(위치와 코드)로 실행되어야 합니다.
+
+2. **노출 조회 실패(`_exposure_snapshot`) 시 처리 방식에 대한 분석**(T08 작업 지침 2).
+   - 현재 `_exposure_snapshot`이 예외를 던져 trader가 예외를 잡고 `counters is None`으로 설정하고 `buy_fn` 호출을 건너뜁니다(`return`).
+   - **보고 사항:** 청산(손절)을 보류하지 않는 것이 좋습니다. 현재 `counters is None`이면 `return`을 하므로 매수와 청산 모두를 건너뜁니다.
+   - 필요: `counters is None`인 경우에도 청산(손절)을 허용하는 플래그를 사용하여 매수만 보류하게 합니다. 구매 후, `_exposure_snapshot` 실패를 최대 1회까지 확장하고, 그 후에도 청산을 위해 유지할지 결정해야 합니다.
+   - **T01 조치:** 이 조건을 평가하고, 변경이 필요한지 확인해야 합니다(수정하지 않고 테스트가 활성화되어야 합니다). 현재는 트레이더 전체를 건너뜁니다.
+
+3. **현재 테스트 331을 확인하는 보고서**(T08 작업 지침 2). `_exposure_snapshot` 실패 시 프로그램이 무엇을 하는지 알지 못하므로 오류와 결정 상황을 올바르게 감지하지 못할 수도 있습니다.
+
+---
+
 # T01 — 사전 조사 및 안전망 (2026-10-18)
 
 브랜치: `improve/t01-baseline` / 베이스: `improve/t00-docs`
@@ -2135,3 +2169,171 @@ $ .venv/bin/python -m pytest
 - **`cancel_order` 미구현(T04b)은 여전하다.** 청산 주문 유형(T06)에 영향.
 - **`main.py` 는 이번 Task 에서도 실행하지 않았다.** 실제 모의투자 1회 실행으로
   `log_capital_summary()` 출력·`sizing` 실동작·주문 수량을 확인하는 것이 다음 단계다.
+
+---
+
+# T08. 판단 로직 순수 함수화 (`decide()`) 및 Broker 인터페이스 (2026-10-23)
+
+브랜치: `improve/t08-decide` | 선행: T02, T05, T06, T07
+
+## 1. 완료 여부
+
+**완료.** 요구사항 1~6 을 모두 구현했고 전체 테스트(331개)가 통과한다.
+다만 **`main.py` 는 실행하지 않았고 모의 API 도 호출하지 않았다**(지침). 실동작 확인은
+사용자 몫이다. 확인하지 못한 항목은 6절에 모았다.
+
+## 2. 변경 파일과 핵심 요약
+
+| 파일 | 변경 | 요약 |
+|---|---|---|
+| `models.py` | **신규** | frozen dataclass — `MarketSnapshot`, `PositionView`, `AccountView`, `DayCounters`, `Decision`. `now`/`last_buy_time` 은 naive 면 생성 시 `ValueError` |
+| `strategy.py` | **신규** | `decide(snapshot, position, account, params, counters, ai_score=None)`. I/O·시간 조회·설정 직접 읽기 **없음**. `params_from_config()`, `merge_params()`, `evaluate_entry_signal()` 포함 |
+| `broker.py` | **신규** | `Broker` Protocol(`get_quote/get_daily_bars/get_balance/place_order/cancel_order/get_order_status`) + `KisOverseasBroker`/`KisDomesticBroker` 어댑터. **기존 `kis_*` 함수를 호출만 한다** — HTTP·TR_ID 를 다시 짜지 않았다 |
+| `trader.py` | 대폭 수정 | `_run_cycle` 을 얇은 오케스트레이터로 교체(판단 제거). `_check_sell` 은 `strategy.decide` 위임 래퍼로 축소(시그니처 유지). 신규 헬퍼: `_fetch_confirmed_bars`, `_position_view`, `_execute_buy`, `_execute_sell` |
+| `config.py` | 수정 | `ENTRY_TREND_FILTER_ENABLED`(기본 false), `ENTRY_TREND_SMA_PERIOD`(200), `AI_FILTER_ENABLED`(기본 true), `BACKTEST_FILL_MODEL`(next_open), `ORDER_WINDOW` 추가 |
+| `tests/test_decide.py` | **신규** | 특성화 표 + 순수성·결정성 테스트 (40개) |
+| `tests/test_broker.py` | **신규** | 어댑터 위임·미구현 차단 테스트 (20개) |
+| `tests/conftest.py` | 수정 | `history.BARS_DIR` 를 임시 경로로 격리(자동) + `confirmed_bars` 픽스처 추가 |
+| `README.md` | 수정 | "판단과 실행의 분리" 절, 환경 변수 4개 추가 |
+
+## 3. 동작이 바뀌는 경우 (지침: 보고서 첫머리에)
+
+### 3-1. 장중 신호가 사라지고 **전일 확정 종가** 기준이 된다 (요구사항 3)
+
+지표를 `history.get_confirmed_bars()` 로만 계산한다. **당일 형성 중인 봉은 제외**된다.
+
+- **T07 이전**: `kis_*.get_daily_closes()`(당일 봉 포함)로 RSI·볼린저를 계산했다.
+  장중에는 "지금까지의 오늘 종가"가 들어갔고, 장이 진행되며 그 봉이 다시 그려지면
+  **같은 날 신호가 뒤집힐 수 있었다**(오전 충족 → 오후 미충족).
+- **T08 이후**: 판단은 하루 동안 **고정**이고, 주문만 `ORDER_WINDOW`(정규장 + 안전 마진) 안에서 나간다.
+
+부작용: **신호가 하루 늦어진다.** 오늘 급락해 RSI 가 30 아래로 내려가도 그 봉은
+내일 확정되므로 오늘은 사지 않는다. 백테스트는 `BACKTEST_FILL_MODEL=next_open`
+(다음 거래일 시가 체결)을 가정하므로 실전과 순서가 같다 — 다만 실전은 **신호가 나온
+사이클의 장중 가격**으로 주문하므로 체결가가 시가와 다르다. 이 차이는 검증되지 않았다.
+
+### 3-2. `decide()` 가 **완전한** `params` 를 요구한다 (설계 결정)
+
+`merge_params()` 는 `config` 를 읽으므로, `decide()` 안에서 부르면 파라미터가 일부만
+넘어왔을 때 **전역 설정에 결합**된다(테스트로 실제 확인했다 — `test_purity_config_change_...`).
+그래서 `decide()` 는 빠진 키를 설정에서 채우지 않고 **예외로 알린다**(`_validate_params`).
+
+- 파라미터를 만드는 것은 호출부의 일이다: 실전은 `strategy.merge_params(...)`,
+  테스트·백테스트는 명시적 dict.
+- 의도: **백테스트 결과가 개발자 `.env` 에 따라 달라지지 않게** 한다.
+- 실전 경로(`_run_cycle`)는 `merge_params` 로 감싸 넘기므로 영향이 없다.
+
+### 3-3. 특성화 테스트에서 확인한, **달라지는** 케이스 목록
+
+| # | 상황 | T07 | T08 | 근거 |
+|---|---|---|---|---|
+| 1 | 지표 설정 + 일봉 조회 실패 | 넘겨받은 목록으로 계산 | `HOLD_INDICATOR_UNAVAILABLE` | 확정 봉으로 출처 통일. T04 의 "조회 실패 ≠ 신호 없음" |
+| 2 | 지표 설정 + 확정 봉 캐시 없음 | KIS 일봉으로 계산 | `HOLD_INDICATOR_UNAVAILABLE`(사유 문자열 구분) | 〃 |
+| 3 | 장중(당일 봉 미확정) | 당일 봉 포함 계산 | 전일 확정 종가 | 요구사항 3 |
+| 4 | `MAX_OPEN_POSITIONS` 초과 | `sizing` 안에서 0주 (`MAX_POSITIONS_REACHED`) | 진입 단계에서 `HOLD_MAX_POSITIONS` | 결정(BUY/HOLD)은 같고 **사유가 명확**해짐 |
+| 5 | 추세 필터 켜짐 + SMA 계산 불가 | (기능 없음) | `HOLD_TREND_FILTER` | 신규. `None` 을 매수 허용으로 보지 않음 |
+| 6 | AI 필터 켜짐 + 점수 없음 | `ai_score` 가 필수 int | `HOLD_AI_FILTER` | 점수를 모르는 채 사지 않음 |
+| 7 | 매수 간격 기준 시각 | `datetime.now(KST)` 직접 조회 | `snapshot.now`(인자) | 순수성 |
+
+**그대로인 것**: RSI 30 · 볼린저 20/2σ · AI 하한 −50 · `MAX_BUYS_PER_DAY` ·
+`MIN_BUY_INTERVAL_HOURS` · 청산 규칙(T06) · 수량 계산(T07) · 청산은 전량.
+`tests/test_decide.py::test_characterization_*` 가 표로 고정한다.
+
+### 3-4. 발견해서 고친 버그 (T08 작업 중)
+
+`_check_entry_limits` 를 처음 작성할 때 `if max_buys > 0 and buy_count >= max_buys` 로
+썼다. T07 의 비교는 `buy_count >= MAX_BUYS_PER_DAY` 이므로 **`MAX_BUYS_PER_DAY=0` 은
+"전부 차단"** 인데, `> 0` 조건을 붙이면 0 이 "무제한"으로 뒤집힌다(설정 하나로 규칙이
+반대로 동작). 특성화 테스트가 잡아서 수정했고 회귀 테스트를 남겼다
+(`test_characterization_hold_when_holding_and_no_exit`).
+
+## 4. 테스트 결과
+
+```
+.venv/bin/python -m pytest -q
+331 passed
+```
+
+- 신규 `tests/test_decide.py` 40개: 특성화(§3-3 표 + 그대로인 것), 달라지는 케이스,
+  순수성(I/O 토큰 grep·config 변경 무영향·`snapshot.now` 사용·naive 거부), 결정성(반복
+  호출 동일·DataFrame 불변·params 불변·frozen), 로그 재현성(계좌정보 미포함·지표값 포함)
+- 신규 `tests/test_broker.py` 20개: 위임 인자, 해외 시장가 차단, 모르는 시장 거부,
+  `supports_order_inquiry` 위임
+- 수정: `tests/conftest.py`(일봉 캐시 격리 — **격리하지 않으면 개발자 PC 의 `data/bars`
+  유무에 따라 테스트 결과가 달라진다**), `tests/test_sizing.py` 3개, `tests/test_order_safety.py` 1개
+
+### 완료 기준 대조
+
+- `decide()` 단위 테스트: 매수 신호 / 신호 없음 / 일일 한도 / 자본 부족 / 청산 사유별 /
+  HOLD — **모두 있음**
+- 결정성: 반복 호출 동일, 입력 DataFrame 미변경 — **있음**
+- `trader.py` 에서 RSI·볼린저·손익 계산 제거 — **확인**:
+  `grep -n 'indicators\.\|profit_pct\|dip_pct\|AI_SCORE_FLOOR\|RSI_OVERSOLD\|bollinger' trader.py` → 0건.
+  `indicators` import 도 제거했다.
+
+## 5. 유지한 안전장치 (지침대로 `decide()` 밖에 둠)
+
+부작용이 있어 순수 함수로 옮기지 **않았다**. 전부 테스트로 고정돼 있다.
+
+| 안전장치 | 위치 | 테스트 |
+|---|---|---|
+| `config.assert_order_allowed()` 실전 가드 | `kis_*.send_order` (그대로) | `test_live_guard.py` |
+| T03 `EXTERNAL` 매도 차단 | `_check_sell` 0단계 | `test_trader_state_wiring.py`(6개) |
+| T03 reconcile 중단 플래그 | `run_trading_cycle` | `test_reconcile.py` |
+| T04 주문 직전 중복 확인 + 미확정 주문 확정 | `_submit_order` / `_resolve_open_orders` | `test_order_safety.py` |
+| T06 주문 직전 잔고 재확인 | `_confirm_sell_quantity` (호출부: `_execute_sell`, `_check_sell`) | `test_exit_rules.py`(4개) |
+
+**요청 지침대로 하지 않은 것**: `broker.py` 로 `_request` 별칭 정리 — 범위 밖이라
+`kis_*` 의 `_request` 는 그대로 두었다. `broker.py` 는 어댑터만 제공하고 실제 호출은
+기존 `kis_*` 함수가 한다.
+
+## 6. 확인하지 못한 항목 (`# VERIFY`)
+
+1. **`main.py` 를 실행하지 않았다.** 지침에 따라 실행·모의 API 호출을 하지 않았다.
+   `_run_cycle` 시그니처는 바뀌지 않았고(`sizing_fn` 은 남겨 둠) `import` 는 확인했지만,
+   실제 1회 실행에서 나오는 로그·주문 수량은 확인하지 못했다.
+2. **`BACKTEST_FILL_MODEL` 의 세 가정(`next_open`/`close`/`next_close`)이 T11 결과를
+   얼마나 바꾸는지 확인하지 않았다.** 값만 문서화했고 백테스트는 아직 없다.
+3. **`pnl` 부호 규약**: `exit_rules.evaluate_exit` 의 `bar_info["atr"]` 는 여전히 `None`
+   을 넘긴다 — ATR 값의 출처(일봉 OHLC)가 미구현이기 때문이다(T06 부터 이월).
+   `STOP_LOSS_ATR_MULT` 기본 0 이라 현재는 영향 없다.
+4. **`_exposure_snapshot` 을 `decide()` 밖에 두었다.** 노출을 못 읽으면
+   `_run_cycle` 이 판단 자체를 건너뛴다(청산 포함). DB 조회 실패는 판단 근거가 아예
+   없기 때문이지만, **이 상태에서 손절도 멈춘다** — 30분 주기면 다음 사이클에 풀리지만
+   연속 실패하면 손실이 커질 수 있다. 별도 Task 로 다룰 것을 권한다.
+5. **총 노출을 원가(`qty × avg_price`) 기준으로 계산하는 것**(T07 이월)은 그대로다.
+6. **`utils.py`·`trading_strategy.py` 삭제 여부**는 여전히 미결(T00 이월).
+
+## 7. 사용자가 결정해야 할 질문
+
+1. **`ENTRY_TREND_FILTER_ENABLED` 를 켤까요?** 기본 false 로 두었습니다. 켜면 SMA(200)
+   계산에 확정 봉 200개가 필요해, **캐시가 200봉을 채울 때까지 매수가 전부 보류**됩니다
+   (사유는 `TREND_FILTER_UNAVAILABLE` 로 남습니다). `data/bars` 를 먼저 채워야 합니다.
+2. **`AI_FILTER_ENABLED` 의 T10 기본값**을 무엇으로 할까요? 지금은 `true`(현재 동작)입니다.
+3. **`_run_cycle` 의 `sizing_fn`·`fetch_closes` 인자를 없앨까요?** 하위 호환으로 남겼고
+   **무시됩니다**(테스트로 고정). 제거하면 호출부 시그니처가 단순해지지만
+   `main.py` 를 건드려야 합니다.
+4. **`decide()` 의 `params` 필수화**(§3-2)가 백테스트 작성에 부담이 되면, `params` 를
+   만드는 헬퍼(`strategy.params_from_values(...)`)를 추가할 수 있습니다.
+5. **6절 항목 4**(노출 조회 실패 시 청산까지 멈춤)를 다음 Task 로 다룰까요?
+6. **악화된 지연(§3-1)을 감수할까요?** 확정 종가 기준으로 바꾸면서 신호가 하루
+   늦어집니다. 정확성(신호가 뒤집히지 않음)과 반응속도(하루 지연)의 맞바꿈이며,
+   T11 백테스트로 어느 쪽이 유리한지 확인할 것을 권합니다.
+
+## 8. 다음 Task 에 영향을 주는 사항
+
+- **판단을 바꾸려면 `strategy.py` 만 고치면 된다.** `trader.py` 에 판단 코드를 다시
+  넣지 마세요 — 백테스트와 실전이 갈라지는 원인이 됩니다.
+- **T11(백테스트)는 `strategy.decide()` 를 그대로 import 해서 돌려야 한다.**
+  판단을 다시 구현하면 이 Task 의 목적이 무효가 됩니다. 필요한 것은
+  `models.MarketSnapshot(확정 봉 DataFrame, ...)` 과 완전한 `params` dict 입니다.
+- **`params` 는 완전해야 한다**(§3-2). 백테스트는 `strategy.merge_params()` 로 만든 뒤
+  시나리오 값을 덮어쓰거나, 명시적 dict 를 넘기세요.
+- **`decide()` 에 AI 인자를 추가하지 않았다.** T10 에서 `ai_score` 처리 방식을 정할 때
+  현재 시그니처(`ai_score: int | None = None`)와 `AI_FILTER_ENABLED` 를 참고하세요.
+- **`broker.py` 는 아직 실행 경로의 유일한 통로가 아니다.** `_run_cycle` 이 `broker`
+  인자를 받지만 실제 호출은 `kis_*` 가 한다(지침: 별칭 정리는 범위 밖). 통합은 별도 Task.
+- **테스트가 `history.BARS_DIR` 를 격리한다**(conftest 자동). 일봉을 쓰는 새 테스트는
+  `confirmed_bars` 픽스처를 쓰면 편합니다.
+- **`config.BACKTEST_FILL_MODEL`·`ORDER_WINDOW` 는 문서화용 값**이며 실행 코드가 읽지
+  않습니다. T11 에서 실제로 소비해야 합니다.

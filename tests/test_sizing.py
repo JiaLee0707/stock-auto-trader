@@ -419,20 +419,63 @@ def test_trader_has_no_buy_ratio_code():
 
 
 def test_run_cycle_signature_has_no_ratio():
-    """`_run_cycle` 이 비중(`ratio`)을 받지 않는다 — 사이징이 수량을 정한다."""
+    """
+    `_run_cycle` 이 비중(`ratio`)을 받지 않는다 — 사이징이 수량을 정한다.
+
+    T08: 수량은 `strategy.decide()` 안의 `sizing.compute_qty` 가 정한다. `_run_cycle` 의
+    `sizing_fn` 인자는 하위 호환으로 남아 있을 뿐 **쓰이지 않는다**(넘겨도 무시된다) —
+    그래서 여기서는 "있어도 되지만 수량 결정에 쓰이지 않는다"를 확인한다.
+    아래 `test_run_cycle_ignores_sizing_fn` 이 그 사실을 실제로 검증한다.
+    """
     import inspect
     params = inspect.signature(trader._run_cycle).parameters
     assert "ratio" not in params
-    assert "sizing_fn" in params, "사이징 콜러블이 배선되지 않았다"
+    assert "params" in params, "판단 파라미터 통로가 배선되지 않았다"
 
 
-def test_zero_qty_does_not_submit_buy(conn, bot, monkeypatch):
+def test_run_cycle_ignores_sizing_fn(conn, bot, monkeypatch, confirmed_bars):
+    """
+    `sizing_fn` 을 넘겨도 **무시된다** — 수량의 유일한 출처는 `strategy`+`sizing` 다.
+
+    T07 에서는 `sizing_fn` 이 수량을 정했다. T08 에서 그 자리를 `decide()` 가 가져갔으므로,
+    넘어온 콜러블이 호출되면 "판단이 두 곳에 있다"는 뜻이다(호출되면 실패시킨다).
+    """
+    monkeypatch.setattr(trader, "_state_conn", lambda: conn)
+    monkeypatch.setattr(config, "USE_INDICATORS", True)
+    confirmed_bars("379800", _BUY_CLOSES)
+    submitted = []
+    called = []
+
+    def sizing_fn(*args, **kwargs):
+        called.append(args)
+        return sizing.SizingResult(999, "OK", 1.0, detail="이 값이 쓰이면 안 된다")
+
+    trader._run_cycle(
+        "국내", "379800",
+        {"quantity": 0.0, "avg_price": 0.0, "profit_rate": 0.0,
+         "total_asset_krw": 1_000_000.0, "cash_krw": 1_000_000.0},
+        23_220.0, 0, lambda p: f"{p:,.0f}원", sell_fn=None, buy_fn=None,
+        market="domestic", submit_buy=lambda qty, price: submitted.append(qty),
+        sizing_fn=sizing_fn, params={"capital_cap_krw": 0},
+    )
+    assert called == [], "sizing_fn 이 호출됐다 — 판단이 두 곳에 있다"
+    assert submitted and submitted[0] != 999, "sizing_fn 의 값이 주문에 쓰였다"
+
+
+def test_zero_qty_does_not_submit_buy(conn, bot, monkeypatch, confirmed_bars):
     """
     수량이 0 이면 **주문하지 않는다.** 최소 1주 강제 매수는 금지다(위험 한도 위반).
+
+    T08: 수량은 `strategy.decide` 안의 `sizing.compute_qty` 가 정한다. 자본 5만원에
+    1주 23,220원이면 **위험 기준**(자산 1% ÷ 손절 3% = 1.7만원 → 0주)에서 0주가 난다 —
+    사이징을 stub 하지 않고 실제 계산으로 확인한다.
     """
     monkeypatch.setattr(trader, "_state_conn", lambda: conn)
     submitted = []
     monkeypatch.setattr(config, "USE_INDICATORS", True)
+    # `.env` 의 CAPITAL_CAP_KRW(모의투자 실전규모 검증용)가 걸려 있으면 자본이 잘려
+    # 수량이 달라진다. 이 테스트는 **수량 계산 자체**를 보므로 상한을 끄고 넘긴다.
+    confirmed_bars("379800", _BUY_CLOSES)
 
     def submit_buy(qty, price):
         submitted.append((qty, price))
@@ -443,28 +486,27 @@ def test_zero_qty_does_not_submit_buy(conn, bot, monkeypatch):
         {"quantity": 0.0, "avg_price": 0.0, "profit_rate": 0.0,
          "total_asset_krw": 50_000.0, "cash_krw": 50_000.0},
         23_220.0, 0, lambda p: f"{p:,.0f}원", sell_fn=None, buy_fn=None,
-        fetch_closes=lambda: list(_BUY_CLOSES), market="domestic",
-        submit_buy=submit_buy,
-        sizing_fn=lambda *a, **kw: sizing.SizingResult(
-            0, sizing.INSUFFICIENT_CAPITAL, 69_660.0, detail="1주 필요 자본"),
+        market="domestic", submit_buy=submit_buy,
+        params={"capital_cap_krw": 0},
     )
     assert submitted == [], "0주인데 주문이 나갔다"
 
 
-def test_positive_qty_submits_that_quantity(conn, bot, monkeypatch):
+def test_positive_qty_submits_that_quantity(conn, bot, monkeypatch, confirmed_bars):
     """양수면 그 수량을 그대로 넘긴다(사이징이 정한 값을 trader 가 바꾸지 않는다)."""
     monkeypatch.setattr(trader, "_state_conn", lambda: conn)
     monkeypatch.setattr(config, "USE_INDICATORS", True)
     submitted = []
+    confirmed_bars("379800", _BUY_CLOSES)
 
     trader._run_cycle(
         "국내", "379800",
         {"quantity": 0.0, "avg_price": 0.0, "profit_rate": 0.0,
          "total_asset_krw": 1_000_000.0, "cash_krw": 1_000_000.0},
         23_220.0, 0, lambda p: f"{p:,.0f}원", sell_fn=None, buy_fn=None,
-        fetch_closes=lambda: list(_BUY_CLOSES), market="domestic",
+        market="domestic",
         submit_buy=lambda qty, price: submitted.append(qty),
-        sizing_fn=lambda *a, **kw: sizing.SizingResult(3, "OK", 69_660.0,
-                                                       detail="위험 1%"),
+        params={"capital_cap_krw": 0},
     )
-    assert submitted == [3]
+    # 자산 100만원: 위험 1%(1만원) ÷ 손절폭 696.6원 = 14주, 현금·비중 기준 19주 → 14주
+    assert submitted == [14]

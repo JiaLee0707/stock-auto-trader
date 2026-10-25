@@ -471,8 +471,12 @@ def test_sell_position_is_reduced_after_fill(conn, fake_refs, monkeypatch):
 def test_indicator_unavailable_holds_off_buy_but_still_allows_sell(conn, fake_refs,
                                                                    monkeypatch):
     """
-    지표 조회 실패 시 **매수는 보류**하되, 손절은 계속 동작해야 한다.
+    지표 데이터를 얻지 못하면 **매수는 보류**하되, 손절은 계속 동작해야 한다.
     (조회 실패로 손절까지 막으면 손실이 무한정 커진다.)
+
+    T08: 지표는 확정 일봉 캐시(`history.get_confirmed_bars`)로만 계산하므로,
+    `fetch_closes` 를 넘겨도 무시된다. 그래서 "데이터 없음"은 **캐시가 빈 상태**로
+    재현한다(conftest 가 `BARS_DIR` 를 임시 경로로 격리하므로 캐시는 비어 있다).
     """
     monkeypatch.setattr(trader, "_state_conn", lambda: conn)
     monkeypatch.setattr(config, "USE_INDICATORS", True)
@@ -489,11 +493,8 @@ def test_indicator_unavailable_holds_off_buy_but_still_allows_sell(conn, fake_re
         submit_buy=lambda qty, price: submitted.append("BUY"),
         submit_sell=lambda reason, qty: submitted.append(("SELL", qty)),
         status_fn=None, cancel_fn=None,
-        # T07: 수량은 사이징이 정한다. 이 테스트는 청산이 계속 동작하는지만 본다.
-        sizing_fn=lambda *a, **kw: sizing.SizingResult(
-            1, "OK", 100.0, detail="테스트"),
     )
-    assert ("SELL", 3.0) in submitted, "지표 조회 실패로 손절까지 막혔다"
+    assert ("SELL", 3.0) in submitted, "지표 데이터가 없을 때 손절까지 막혔다"
     assert "BUY" not in submitted, "지표 데이터가 없는데 매수했다"
 
 

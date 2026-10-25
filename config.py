@@ -224,6 +224,22 @@ BB_PERIOD              = int(os.getenv("BB_PERIOD", "20"))
 BB_NUM_STD             = float(os.getenv("BB_NUM_STD", "2.0"))
 AI_SCORE_FLOOR         = int(os.getenv("AI_SCORE_FLOOR", "-50"))
 
+# ── 진입 추세 필터 (T08 신규, 기본 꺼짐) ─────────────────
+# 목표 전략(CLAUDE.md 표)은 "종가 > SMA(200)" 을 진입 필터로 둔다. 다만 **아직
+# 검증되지 않았고**(T11 백테스트 대상), 켜면 SMA(200) 계산에 확정 봉 200개가
+# 필요해 데이터가 부족한 동안 매수가 전부 보류된다. 그래서 기본은 꺼짐이다 —
+# 켰을 때의 동작(= 데이터 부족 시 매수 보류)은 `strategy._entry_trend_ok` 참고.
+ENTRY_TREND_FILTER_ENABLED = (
+    os.getenv("ENTRY_TREND_FILTER_ENABLED", "false").strip().lower() == "true"
+)
+ENTRY_TREND_SMA_PERIOD = int(os.getenv("ENTRY_TREND_SMA_PERIOD", "200"))
+
+# ── AI 점수 필터 (T08 신규) ──────────────────────────────
+# `True` = 지금까지의 동작(AI 점수 < AI_SCORE_FLOOR 이면 매수 안 함)을 그대로 유지한다.
+# **T10 에서 기본값을 바꿀 예정이므로 지금은 True 로 둔다.**
+# `False` 로 두면 `decide()` 가 AI 점수를 아예 쓰지 않는다(점수를 못 받아도 매수한다).
+AI_FILTER_ENABLED = os.getenv("AI_FILTER_ENABLED", "true").strip().lower() == "true"
+
 # ── 포지션 사이징 (T07: 위험 기준) ───────────────────────
 # "총자산 × 비중" 방식은 1주 가격과 무관하게 예산이 정해져, 20만원에서
 # 10% = 2만원 < 1주 2.3만원 → 0주가 됐다(CLAUDE.md "현재 알려진 문제").
@@ -338,6 +354,22 @@ ORDER_PRICE_TICKS = int(os.getenv("ORDER_PRICE_TICKS", "0"))
 
 # 미체결 주문을 이 시간(분)까지 기다렸다가 취소한다. 0 이하면 자동 취소 비활성.
 ORDER_TIMEOUT_MINUTES = float(os.getenv("ORDER_TIMEOUT_MINUTES", "30"))
+
+# ── 백테스트 체결 가정 (T08) ─────────────────────────────
+# 신호는 **확정 종가**(전일까지)로 내고 주문은 장중에 낸다. 백테스트에서 "그 주문이
+# 어느 가격에 체결됐다고 볼 것인가"를 명시하는 값이다. 실전 판단에는 쓰이지 않는다.
+#   next_open (기본): 신호 다음 거래일 **시가**에 체결됐다고 가정한다.
+#                     확정 종가로 판단하고 다음 날 시가에 사는 실제 순서와 가장 가깝다.
+#   close           : 신호가 나온 봉의 **종가**에 체결됐다고 가정한다(낙관적).
+#   next_close      : 다음 거래일 종가에 체결됐다고 가정한다(보수적).
+# # VERIFY: 세 가정의 차이가 T11 백테스트 결과를 얼마나 바꾸는지 확인하지 않았다.
+BACKTEST_FILL_MODEL = os.getenv("BACKTEST_FILL_MODEL", "next_open").strip().lower()
+
+# 주문 가능 구간 (T05 `market_calendar.is_order_window` 가 판정). 문서화용 값이다 —
+# 판단(`strategy.decide`)은 주문 시각을 보지 않고, 주문 여부는 `main.py` 가 시장
+# 캘린더로 먼저 막는다. "신호는 장 마감 후 확정 종가로, 주문은 다음 날 이 구간에"라는
+# 순서를 코드 밖에서도 확인할 수 있게 남긴다.
+ORDER_WINDOW = "regular_session_with_margins"
 
 # ── 시장 캘린더 (T05) ────────────────────────────────────
 # 정규장 판정은 `market_calendar` 가 exchange_calendars(XKRX/XNYS) 로 한다.

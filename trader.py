@@ -1,23 +1,40 @@
 """
-매매 판단 및 실행 모듈 (스노우볼 전략).
+매매 **실행** 모듈 (T08: 판단은 `strategy.py` 로 옮겼다).
 
 해외(QQQ)와 국내(379800) ETF를 매 사이클마다 각각 판단해 동시 운용한다.
 
-매수 조건 (AND):
-  1. 진입 타점 (USE_INDICATORS=True면 지표, 아니면 하락률)
-     - 지표: RSI(14) <= RSI_OVERSOLD(30) 이고 종가 <= 볼린저 하단
-     - 하락률: 현재가 < 평균 단가 × (1 + DIP_THRESHOLD/100), 보유 없으면 최초 매수 허용
-  2. AI 점수 >= AI_SCORE_FLOOR                      →  심각한 악재 없음
-  3. 당일 매수 횟수 < MAX_BUYS_PER_DAY              →  분할 매수 상한
-  4. 직전 매수 후 MIN_BUY_INTERVAL_HOURS 경과        →  매수 소진 방지
+## T08 이후 역할 분담
 
-매도 조건 (T06: 부분 익절 폐기 — 청산은 **전량**, 사유는 **하나**)
-  판단은 `exit_rules.evaluate_exit()` **순수 함수**가 한다(I/O 없음).
-  우선순위: 손절 > 시간청산 > 목표가 > 트레일링 > 과매수.
-  여기(`trader`)는 I/O 만 담당한다 — 포지션 조회, 브로커 수량 재확인, 주문.
+  **판단은 이 모듈에 없다.** 매수·청산·수량은 모두 순수 함수다.
+    - `strategy.decide()`   매수/매도/대기 + 수량 (I/O 없음)
+    - `exit_rules`          청산 사유 (T06)
+    - `sizing`              수량 (T07)
 
-  T06 이전에는 부분 익절(2/4/6% 단계별 분할)이었고, 소액(1~4주)에서 최소 수량
-  보정 때문에 첫 단계에 전량이 나가는 결함이 있었다(CLAUDE.md 참고).
+  이 모듈은 **오케스트레이션만** 한다:
+    브로커에서 데이터 수집 → `reconcile` → `decide()` → 주문(T04) → DB 갱신.
+
+  판단을 순수 함수로 옮긴 이유는 **백테스트와 실전이 같은 판단을 쓰게** 하기 위함이다.
+  그전에는 판단이 `_run_cycle` 안에 `config`·`bot_state` 전역과 섞여 있어 백테스트에서
+  재현할 수 없었다(CLAUDE.md "백테스트와 실전 판단 로직이 별개일 가능성").
+
+## 판단을 옮기지 **않은** 것 (의도)
+
+  부작용이 있거나 "판단 이전/이후"의 사실에 의존하는 것들은 여기 남는다.
+    - `config.assert_order_allowed()`   주문 함수 맨 앞의 실전 가드 (절대 규칙 1)
+    - T03 `EXTERNAL` 매도 차단 + reconcile 중단 플래그 확인
+    - T04 주문 직전 **중복 확인**(`db.has_open_order`)·미확정 주문 확정
+    - T06 주문 직전 **브로커 잔고 재확인**(`_confirm_sell_quantity`)
+  이것들을 `decide()` 로 끌어오면 "모르는 값을 판단 입력으로" 넣게 되어,
+  조회 실패 시 추측한 수량으로 주문이 나갈 수 있다.
+
+## 지표는 확정 봉만 쓴다 (T08 — 동작이 바뀐 부분)
+
+  `_run_cycle` 은 확정 일봉(`history.get_confirmed_bars`, T02)으로 지표를 계산해
+  `MarketSnapshot.bars` 로 넘긴다. 그래서 **당일 미확정 봉은 신호에 들어가지 않는다** —
+  장중에 오늘 봉이 다시 그려지면서 신호가 뒤집히지 않고, 판단이 하루 동안 고정된다.
+  T07 까지는 KIS 일봉(당일 봉 포함)으로 계산했다.
+
+  체결 가정은 `config.BACKTEST_FILL_MODEL`(기본 `next_open`)로 문서화했다.
 """
 import json
 import logging
@@ -25,14 +42,17 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import broker as broker_module
 import config
 import db
 import exit_rules
-import indicators
+import history
 import kis_domestic as kd
 import kis_overseas as kis
+import models
 import reconcile
 import sizing
+import strategy
 from state import bot_state, get_bot_state
 
 KST = ZoneInfo("Asia/Seoul")
@@ -751,34 +771,42 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
                 bar_info: dict | None = None, refresh_balance=None,
                 now: datetime | None = None) -> bool:
     """
-    청산 판단 및 실행 (T06). 매도했으면 True.
+    청산 판단 및 실행 — **T08 부터는 `strategy.decide()` 위임 래퍼다.**
 
-    **판단은 `exit_rules.evaluate_exit()` 가 한다**(순수 함수, I/O 없음). 여기서는
-    I/O 만 한다 — 포지션·현재가 조회, 브로커 수량 재확인, 주문.
+    T06~T07 에서는 이 함수가 `exit_rules.evaluate_exit()` 를 **직접** 불렀다. T08 에서
+    매수·청산 판단을 `strategy.decide()` 하나로 모으면서, 이 함수는 다음만 한다.
+      1. T03 의 **EXTERNAL 매도 차단 가드** (판단 이전의 안전 점검 — 순수 함수로 못 옮긴다)
+      2. `strategy.decide()` 호출 (판단)
+      3. 브로커 잔고 재확인 → 주문 (부작용)
+
+    시그니처는 T06 그대로 유지한다 — `tests/test_exit_rules.py`·
+    `tests/test_trader_state_wiring.py` 가 이 이름과 인자로 배선을 검증한다.
 
     Args:
-        sell_fn: (수량) -> 주문 실행 콜러블 (DB 기록 없는 하위 호환 경로)
-        signal: 지표 신호(indicators.evaluate). 과매수 청산에만 쓰고 값은 바뀌지 않는다.
-        market: 포지션 시장 구분(DB 기록용). None이면 DB 기록을 건너뛴다(하위 호환).
-        avg_price: 평균 단가(DB 기록용). None이면 DB 값을 쓴다.
-        submit_sell: (사유, 수량) -> order_id. write-ahead 주문 콜러블 (T04/T06)
-        position: 진입 시각·고점 등이 담긴 포지션 dict. None 이면 DB 에서 읽는다.
-        current_price: 현재가. None 이면 `avg_price × (1+수익률)` 로 역산한다.
-        bar_info: {"atr": float|None, "overbought": bool}. 없으면 ATR·과매수 판단을 건너뛴다.
+        profit_rate: 잔고 응답의 수익률(%). `avg_price` 와 **같은 응답**에서 온 값이라
+            서로 모순되지 않는다. 판단에 쓸 현재가는 여기서 **역산**한다 —
+            별도 시세 API 의 현재가를 섞으면 두 값이 어긋날 때(-10% 라는데 계산은 0%)
+            손절이 발동하지 않는 상태가 생긴다(T06 실측).
+        signal: 지표 신호. 과매수 청산에만 쓰고 값은 바뀌지 않는다.
         refresh_balance: () -> 잔고 dict. 주면 **주문 직전에** 실제 보유 수량을 재확인한다
-                (요구사항 5). 없으면 DB 수량을 그대로 쓴다는 뜻이며, 그때는 경고를 남긴다.
-        now: 판단 기준 시각(tz-aware). None 이면 `db.now_kst()`.
+            (요구사항 5). 없으면 DB 수량을 그대로 쓴다.
 
-    사유 문자열(`STOP_LOSS` 등)은 `orders.reason` 과 로그에 그대로 남는다(요구사항 4).
+    **`_run_cycle()` 은 T08 부터 이 함수를 부르지 않는다**(`strategy.decide` 를 직접
+    쓴다). 남겨 둔 이유는 하위 호환과, EXTERNAL 가드·잔고 재확인이 배선된 상태로
+    청산만 따로 검증하는 테스트가 있기 때문이다.
     """
     if qty <= 0:
         logger.info(f"⏩ {prefix} 매도 조건 미충족 (보유 수량 없음)")
         return False
 
+    # 판단 기준 시각. tz-aware 만 쓴다(절대 규칙 9).
+    now = now or db.now_kst()
+
     # ── 0. 외부 보유는 매도하지 않는다 (T03) ──────────────
     # 매도 수량은 **브로커 잔고**에서 오므로, DB 상태를 보지 않으면 봇이 만들지 않은
     # 보유까지 손절·익절 규칙으로 팔아버린다. `EXTERNAL` 은 "봇이 만든 기록이 없는 보유"이므로
-    # 봇의 관리 대상이 아니다. 사람이 직접 정리해야 한다.
+    # 봇의 관리 대상이 아니다. **이 가드는 부작용(DB 조회)이 있으므로 `decide()` 가 아니라
+    # 여기(오케스트레이션)에 남긴다**(요청 지침).
     pos = position
     if market:
         try:
@@ -794,30 +822,33 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
             )
             return True
 
-    # ── 1. 청산 판단 (순수 함수, I/O 없음) ────────────────
-    # 가격은 **한 출처에서만** 가져온다.
-    # `avg_price` 와 `profit_rate` 는 같은 잔고 응답에서 온 값이라 서로 모순되지 않는다.
-    # 별도 시세 API 의 현재가를 섞으면 두 값이 어긋날 때(-10% 라는데 계산은 0%)
-    # 손절이 발동하지 않는 상태가 생긴다 — 실제로 이 사이클에서 그런 불일치가 있었다.
-    # 그래서 현재가는 수익률에서 **역산**한다(비율만 맞으면 되므로 수익률 계산에 충분하다).
+    # ── 1. 청산 판단 (순수 함수 `strategy.decide` — I/O 없음) ─
     entry_price = float(avg_price or (pos or {}).get("avg_price") or 0.0)
-    current_price = entry_price * (1.0 + profit_rate / 100.0) if entry_price > 0 else 0.0
+    # 현재가는 **수익률에서 역산**한다. `current_price` 인자는 하위 호환이며 값이
+    # 넘어와도 `profit_rate` 와 같은 잔고 응답에서 나온 값이라 결과가 같다.
+    judged_price = entry_price * (1.0 + profit_rate / 100.0) if entry_price > 0 else 0.0
 
-    judgment = {
-        "qty": qty,
-        "avg_price": entry_price,
-        "current_price": current_price,
-        "entry_time": (pos or {}).get("entry_time"),
-        "peak_price_since_entry": (pos or {}).get("peak_price_since_entry"),
-        # 시장을 모르면 보유 거래일을 셀 수 없어 시간청산이 발동하지 않는다
-        # (exit_rules 가 경고를 남긴다). 임의로 다른 시장을 가정하지 않는다.
-        "market": market,
-    }
-    exit_signal = exit_rules.evaluate_exit(
-        judgment, bar_info, exit_rules.params_from_config(),
-        now or db.now_kst(),
+    decision = strategy.decide(
+        models.MarketSnapshot(symbol=ticker, bars=None, last_price=judged_price, now=now),
+        models.PositionView(
+            qty=float(qty), avg_price=entry_price,
+            entry_date=(pos or {}).get("entry_time"),
+            peak_price=(pos or {}).get("peak_price_since_entry"),
+        ),
+        models.AccountView(),          # 청산 판단에는 자본이 쓰이지 않는다
+        strategy.merge_params({
+            "use_indicators": False,   # 지표는 `signal` 로 이미 계산돼 넘어온다
+            "market": market,
+            # 청산만 보는 경로다. 진입 제한이 먼저 걸려 청산이 가려지면 안 된다.
+            "max_buys_per_day": 0,
+            "overbought_signal": bool(signal and signal.get("sell_signal")),
+            # bar_info 는 T06 의 ATR·과매수 통로다. 넘어온 값을 그대로 쓴다.
+            "exit": {"overbought_exit_enabled": bool(bar_info and bar_info.get("overbought"))},
+        }),
+        models.DayCounters(),
+        ai_score=None,
     )
-    if exit_signal is None:
+    if not decision.is_sell:
         logger.info(
             f"⏩ {prefix} 매도 조건 미충족 (수익률: {profit_rate:.2f}%, "
             f"기준: 목표 +{config.TAKE_PROFIT_PCT}% / 손절 {config.STOP_LOSS_PCT}% / "
@@ -825,10 +856,10 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
         )
         return False
 
-    reason = exit_signal.reason
-    label = exit_rules.LABELS[reason]
+    reason = decision.reason
+    label = exit_rules.LABELS.get(reason, reason)
     logger.info(
-        f"📤 {prefix} 청산 판단 — {label}({reason}): {exit_signal.detail} "
+        f"📤 {prefix} 청산 판단 — {label}({reason}): {decision.meta.get('detail')} "
         f"→ {qty:.0f}주 전량 매도"
     )
 
@@ -855,36 +886,84 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
     return True
 
 
+def _fetch_confirmed_bars(symbol: str, now: datetime):
+    """
+    **확정 일봉**을 DataFrame 으로 만든다 (T08 요구사항 3).
+
+    `history.get_confirmed_bars()` 는 당일 봉을 제외한 일봉 목록(dict)을 준다.
+    판단 함수는 DataFrame 을 받으므로 여기서 변환한다 — 변환(I/O·자료형)은
+    오케스트레이션의 일이고, `strategy.decide` 는 순수하게 남는다.
+
+    **조회 실패와 데이터 없음을 구분한다** (T04 원칙).
+      - 캐시 파일이 없거나 비어 있으면 → 빈 DataFrame. "신호 없음"이며 매수하지 않는다.
+      - 읽기 자체가 실패하면(권한·손상) → 호출부가 알 수 있게 예외를 올린다.
+    pandas 는 `history`/`market_calendar` 가 이미 쓰는 전이 의존성이라 새로 추가하지 않는다.
+    """
+    import pandas as pd
+
+    bars = history.get_confirmed_bars(symbol, as_of=now)
+    if not bars:
+        return pd.DataFrame(columns=history.COLUMNS)
+    return pd.DataFrame(bars, columns=history.COLUMNS)
+
+
+def _entry_signal_meta(symbol: str, bars, now: datetime) -> dict:
+    """`MarketSnapshot` 에 남길 일봉 요약(로그용). 마지막 확정 봉 날짜와 건수."""
+    try:
+        count = int(len(bars)) if bars is not None else 0
+    except TypeError:
+        count = 0
+    last_date = None
+    if count:
+        try:
+            last_date = str(bars["date"].iloc[-1])
+        except Exception as e:
+            # 메타는 로그용이다 — 실패를 삼키지 않고 알리되 판단은 계속한다.
+            logger.warning(f"⚠️ [{symbol}] 확정 봉 날짜를 읽지 못했습니다: {e}")
+    return {"confirmed_bars": count, "last_confirmed_date": last_date}
+
+
 def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
                ai_score: int, price_fmt: str, sell_fn, buy_fn,
                fetch_closes=None, market: str | None = None,
                submit_buy=None, submit_sell=None, status_fn=None, cancel_fn=None,
                refresh_balance=None, refresh_peak=None, now: datetime | None = None,
-               sizing_fn=None, fx_rate: float = 1.0):
+               sizing_fn=None, fx_rate: float = 1.0, params: dict | None = None,
+               broker=None):
     """
-    해외·국내 공통 매매 사이클 로직.
+    해외·국내 공통 매매 사이클 — **얇은 오케스트레이터** (T08).
 
-    T07 에서 `ratio`(1회 매수 비중) 인자를 **없앴다.** 수량은 `sizing_fn` 이 정한다.
-    T07 이전에는 "총자산 × 비중"이었는데, 소액(20만원)에서는 비중 방식이 0주를 내
-    매수 신호가 맞아도 주문이 나가지 않았다(CLAUDE.md "현재 알려진 문제").
+    하는 일은 넷뿐이다. 판단은 하지 않는다.
+      1. **데이터 수집** — 확정 일봉, 보유·자본·카운터 (I/O)
+      2. **사전 정리** — 미확정 주문 확정, 진입 후 고점 갱신 (I/O)
+      3. **판단** — `strategy.decide()` (순수, I/O 없음)
+      4. **실행** — `submit_buy`/`submit_sell` 로 주문, 카운터 기록 (I/O)
+
+    T07 까지 이 함수 안에 있던 RSI·볼린저·손익률 계산과 AI 점수 비교는 **전부
+    `strategy.py` 로 옮겼다.** 여기에는 지표 계산도, 임계값 비교도 없다.
 
     Args:
         price_fmt: 로그용 가격 포맷 함수
-        sell_fn / buy_fn: (수량) / (수량, 가격) 주문 실행 콜러블.
-                T04 부터 실제 주문은 `submit_*` 가 내므로, `buy_fn` 은 예산으로
-                1주라도 살 수 있는지 판단하는 데만 쓰인다(`_BudgetProbe`).
+        sell_fn / buy_fn: (수량) / (수량 × 가격) 주문 콜러블. T04 부터 실제 주문은
+                `submit_*` 가 내므로 `buy_fn` 은 예전 경로(`market=None`)에만 쓰인다.
+        fetch_closes: 하위 호환용 인자. **T08 부터 쓰지 않는다** — 지표는 확정 일봉
+                (`history.get_confirmed_bars`)으로만 계산한다. 호출부(`main`)가
+                당일 봉 포함 목록을 넘겨도 무시한다. 시그니처는 유지한다.
         market: 시장 구분(DB 기록용). None이면 DB 기록을 건너뛰고 예전 경로를 쓴다.
-        sizing_fn: (equity, cash, price, *, open_positions, current_exposure_krw)
-                -> `sizing.SizingResult`. **T07 신규 — 수량 결정의 유일한 출처다.**
-                주면 `submit_buy(qty, price)` 로 수량을 넘긴다.
-        submit_buy: (수량, 가격) -> order_id. write-ahead 기록 + 전송 (T04).
-                **T07 에서 인자가 "예산"에서 "수량·가격"으로 바뀌었다** —
-                수량 결정이 사이징으로 옮겨 갔으므로 trader 가 다시 계산하지 않는다.
-        submit_sell: (사유, 수량) -> order_id. **T06 에서 사유가 추가됐다.**
+        sizing_fn: **T08 부터 쓰지 않는다.** 수량은 `strategy.decide()` 안에서
+                `sizing.compute_qty` 로 정해진다. 시그니처만 남겨 둔다(하위 호환).
+        submit_buy: (수량, 가격) -> order_id. write-ahead 기록 + 전송 (T04)
+        submit_sell: (사유, 수량) -> order_id (T06)
         status_fn / cancel_fn: 체결 조회 / 미체결 취소 (T04)
         refresh_balance: () -> 잔고 dict. 청산 직전 실제 보유 수량 재확인 (요구사항 5)
-        refresh_peak: () -> float|None. 진입 후 고점 갱신 (트레일링용, 요구사항 2)
+        refresh_peak: () -> float|None. 진입 후 고점 갱신 (트레일링용)
         now: 판단 기준 시각(tz-aware). None 이면 `db.now_kst()`.
+        params: `strategy.merge_params()` 로 채워질 파라미터. `market`·`fx_rate` 는
+                여기서 채워 넣는다(호출부가 넘긴 값이 우선).
+        broker: `broker.Broker` 어댑터. 현재는 로그·검증용으로만 받는다 —
+                실제 호출은 기존 `kis_*` 함수가 그대로 한다(요청 지침: 별칭 정리는 범위 밖).
+
+    반환: 없음. 결정과 입력 지표값은 로그에 남는다(재현용).
     """
     qty         = balance["quantity"]
     avg_price   = balance["avg_price"]
@@ -922,100 +1001,43 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             logger.error(f"⛔ [{prefix}] 미확정 주문 조회 실패 — 신규 주문을 건너뜁니다: {e}")
             return
 
-    # ── 보조지표 신호 (RSI + 볼린저밴드) ──────────────────
-    signal = None
-    if config.USE_INDICATORS and fetch_closes is not None:
+    # ── 데이터 수집: 확정 일봉 (T08 요구사항 3) ───────────
+    # 지표는 **확정 봉만** 쓴다. `bars_received=False` 는 "조회에 실패했다"는 뜻이고,
+    # 빈 DataFrame 은 "캐시가 비어 있다"는 뜻이다 — `strategy` 는 두 경우 모두 매수를
+    # 보류하되 사유를 구분해 남긴다. 어느 쪽이든 **청산은 계속된다**(가격 기반 규칙).
+    import pandas as pd
+
+    bars = pd.DataFrame(columns=history.COLUMNS)
+    bars_meta = {"confirmed_bars": 0}
+    bars_received = True
+    if market:
         try:
-            signal = indicators.evaluate_or_none(fetch_closes)
-            logger.info(f"[{prefix} 지표] {signal['reason']}")
-        except indicators.IndicatorDataUnavailable as e:
-            # 조회 실패를 "신호 없음"으로 바꾸면 하락률 폴백 매수로 이어진다 (T04).
-            # 데이터를 모를 때는 사지 않는다. 청산 판단은 가격 기반 규칙으로 계속한다.
-            logger.error(f"⛔ [{prefix}] 지표 데이터 없음 — 이번 사이클 매수를 보류합니다: {e}")
-            _check_sell(prefix, ticker, qty, profit_rate, sell_fn, None,
-                        market=market, avg_price=avg_price,
-                        submit_sell=submit_sell, current_price=current_price,
-                        now=now)
-            return
+            bars = _fetch_confirmed_bars(ticker, now)
+            bars_meta = _entry_signal_meta(ticker, bars, now)
+        except Exception as e:
+            bars_received = False
+            logger.error(f"⛔ [{prefix}] 확정 일봉 조회 실패 — 이번 사이클 매수를 보류합니다: {e}")
 
-    # ── 청산 (순수 함수 판단 → I/O 실행, T06) ─────────────
-    # 과매수 청산은 T06 에서 기본 꺼짐이라 `sell_signal` 을 그대로 쓰지 않고
-    # 설정이 켜져 있을 때만 켠다(검증되지 않은 신호를 청산 사유에 섞지 않는다).
-    bar_info = {
-        "atr": None,
-        "overbought": bool(signal and signal.get("sell_signal"))
-                      and config.OVERBOUGHT_EXIT_ENABLED,
-    }
-    if _check_sell(prefix, ticker, qty, profit_rate, sell_fn, signal,
-                   market=market, avg_price=avg_price, submit_sell=submit_sell,
-                   current_price=current_price, bar_info=bar_info,
-                   refresh_balance=refresh_balance, now=now):
-        return
-
-    # ── 매수 (T07) ──────────────────────────────────────────
-    buy_count = bot_state.buy_count_today(ticker)
-    if buy_count >= config.MAX_BUYS_PER_DAY:
-        logger.info(f"⏩ [{prefix}] 당일 매수 상한 도달 ({buy_count}/{config.MAX_BUYS_PER_DAY}회) — 매수 스킵")
-        return
-
-    # 직전 매수 후 최소 간격 체크 (2회차 이상부터 적용)
-    if buy_count > 0:
-        last_t = bot_state.last_buy_time(ticker)
-        if last_t:
-            elapsed_h = (datetime.now(KST) - last_t).total_seconds() / 3600
-            if elapsed_h < config.MIN_BUY_INTERVAL_HOURS:
-                logger.info(
-                    f"⏩ [{prefix}] 직전 매수 후 {elapsed_h:.1f}h 경과 "
-                    f"(최소 {config.MIN_BUY_INTERVAL_HOURS:.1f}h 필요) — 매수 스킵"
-                )
-                return
-
-    # 조건 1: 진입 타점 (지표가 있으면 지표, 없으면 평단 대비 하락률)
-    if avg_price > 0:
-        dip_pct = (current_price - avg_price) / avg_price * 100
-    else:
-        dip_pct = 0
-
-    if signal is not None:
-        entry_ok = signal["buy_signal"]
-        entry_desc = f"지표 매수신호 (RSI {signal['rsi']:.1f} ≤ {config.RSI_OVERSOLD:g} + BB 하단 이탈)"
-    else:
-        # 보유 없으면 최초 매수 허용 (기존 하락률 기준)
-        entry_ok = (avg_price == 0) or (dip_pct <= config.DIP_THRESHOLD)
-        entry_desc = f"딥 하락률 {dip_pct:.2f}% (기준: {config.DIP_THRESHOLD}%)"
-
-    # 조건 2: AI 점수 체크
-    ai_ok = ai_score >= config.AI_SCORE_FLOOR
-
-    logger.info(
-        f"[{prefix} 매수 조건] {entry_desc} → {'✅' if entry_ok else '❌'} | "
-        f"AI점수: {ai_score} (기준: ≥{config.AI_SCORE_FLOOR}) "
-        f"→ {'✅' if ai_ok else '❌'} | "
-        f"매수 횟수: {buy_count}/{config.MAX_BUYS_PER_DAY}"
-    )
-
-    if not (entry_ok and ai_ok):
-        logger.info(f"❌ [{prefix}] 매수 조건 미충족 — 대기")
-        return
-
-    # ── 수량 결정 (T07: 위험 기준·현금 기준 중 작은 쪽) ────
-    # 예전에는 `총자산 × 비중`이었다. 그 방식은 1주 가격을 보지 않아 자본 20만원 ×
-    # 10% = 2만원 < 1주 23,220원 → **0주**가 됐고, 손절폭도 보지 않아 손절 -3%든
-    # -30%든 같은 수량을 냈다. 이제 수량은 `sizing` 이 정하고 trader 는 그대로 쓴다.
-    if sizing_fn is None:
-        logger.error(f"⛔ [{prefix}] 사이징 함수가 없어 매수를 건너뜁니다")
-        return
-
-    # 총 노출·보유 종목 수는 DB(포지션 기록)에서 읽는다. 못 읽으면 매수를 보류한다 —
-    # 노출을 모르는 채로 사면 상한을 넘길 수 있다.
+    # ── 카운터·자본·포지션 (I/O) ──────────────────────────
+    # 노출·보유 종목 수를 못 읽으면 매수하지 않는다 — 노출을 모르는 채로 사면
+    # 상한을 넘길 수 있다. 청산은 계속한다.
+    counters = None
     try:
         open_positions, exposure_krw = _exposure_snapshot(market, ticker, fx_rate)
+        counters = models.DayCounters(
+            buy_count_today=int(bot_state.buy_count_today(ticker)),
+            last_buy_time=bot_state.last_buy_time(ticker),
+            open_positions=open_positions,
+            exposure_krw=exposure_krw,
+        )
     except Exception as e:
-        logger.error(f"❌ [{prefix}] 보유·노출 조회 실패 — 매수 보류: {e}")
-        return
+        logger.error(f"❌ [{prefix}] 보유·노출·카운터 조회 실패 — 매수 보류: {e}")
 
-    # 상한(CAPITAL_CAP_KRW)을 적용한 자본으로 사이징한다. 모의투자 1,000만원으로
-    # 실전 20만원과 같은 수량이 나오게 하려는 것이다(설정 0 = 상한 없음).
+    position = _position_view(ticker, market, qty, avg_price)
+
+    # **자본 상한(`CAPITAL_CAP_KRW`)은 여기서 적용하지 않는다** — `strategy.decide()` 안의
+    # `sizing.apply_capital_cap` 이 적용한다. 두 곳에서 자본을 제한하면 서로 어긋나고,
+    # 백테스트가 파라미터로 상한을 바꿀 수 없다. 여기서는 로그용으로만 미리 계산한다.
     capped_total, capped_cash = sizing.apply_capital_cap(total_krw, cash_krw)
     if (capped_total, capped_cash) != (total_krw, cash_krw):
         logger.info(
@@ -1023,35 +1045,155 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             f"예수금 {cash_krw:,.0f} → {capped_cash:,.0f}원 (CAPITAL_CAP_KRW)"
         )
 
-    try:
-        plan = sizing_fn(capped_total, capped_cash, current_price,
-                         open_positions=open_positions,
-                         current_exposure_krw=exposure_krw)
-    except Exception as e:
-        # 계산 실패를 "매수 안 함"으로 조용히 삼키지 않는다 — 원인이 설정일 수 있다.
-        logger.error(f"❌ [{prefix}] 수량 계산 실패 — 매수하지 않습니다: {e}")
+    # 청산 판단에 쓸 가격. **잔고 응답의 수익률에서 역산한다** (T06 단일 출처 원칙).
+    # 시세 API 현재가를 섞으면 두 값이 어긋날 때(-10% 라는데 계산은 0%) 손절이
+    # 발동하지 않는 상태가 생긴다. 진입·수량은 반대로 시세 현재가를 쓴다 — 실제로
+    # 주문할 가격이기 때문이다. 두 값의 출처가 다르다는 사실을 여기서 명시한다.
+    exit_price = None
+    if qty > 0 and avg_price > 0:
+        exit_price = float(avg_price) * (1.0 + float(profit_rate) / 100.0)
+
+    cycle_params = strategy.merge_params({
+        **(params or {}),
+        "market": market,
+        "fx_rate": fx_rate,
+        "exit_price": exit_price,
+        # 조회 실패(`False`)와 캐시 없음(빈 DataFrame)을 `strategy` 가 구분할 수 있게 알린다.
+        "bars_received": bars_received,
+        "bars_unavailable_detail": (
+            "확정 일봉 조회 실패 — 매수 보류" if not bars_received
+            else "확정 일봉 캐시 없음 — 매수 보류"
+        ),
+    })
+
+    snapshot = models.MarketSnapshot(symbol=ticker, bars=bars,
+                                    last_price=float(current_price), now=now)
+    # **상한을 적용하지 않은 실제 자본**을 넘긴다 — 상한 적용은 `decide()` 안에서 한다.
+    account = models.AccountView(equity=total_krw, cash=cash_krw)
+
+    # ── 판단 (순수 함수) — 매수·청산·수량을 한 번에 ─────────
+    # 청산이 매수보다 우선이므로, 지표를 못 얻었거나 진입 제한에 걸려도 **손절은
+    # 그대로 판단된다**(`strategy.decide` 의 판단 순서 1번).
+    #
+    # 노출·보유 종목 수를 못 읽었으면(`counters is None`) **판단하지 않는다** —
+    # 진입 제한을 모르는 채 매수 결정을 내리면 상한을 넘길 수 있다. 청산까지 막히지만,
+    # 이 상태는 다음 사이클에서 `_exposure_snapshot` 이 정상이 되면 풀리고,
+    # `reconcile` 중단 플래그가 아니라 그 종목의 매수만 보류하는 국소적 실패다.
+    # (T04 의 "미체결 취소 실패" 차단과 같은 원칙 — 손절은 계속 나가야 한다. 다만
+    #  노출 조회 실패는 DB 자체의 문제라 판단 근거가 아예 없다.)
+    if counters is None:
+        logger.error(f"⛔ [{prefix}] 카운터를 읽지 못해 이번 사이클 판단을 건너뜁니다")
         return
 
-    if plan.qty < 1:
-        # **최소 1주를 강제로 사지 않는다.** 위험 한도를 넘기 때문이다.
-        # 대신 왜 못 사는지와 얼마가 더 필요한지를 남겨 사용자가 판단하게 한다.
-        logger.warning(
-            f"⚠️ [{prefix}] 매수하지 않음 — {plan.reason}: {plan.message}\n"
-            f"   1주 필요 자본 약 {plan.required_capital:,.0f}원 | {plan.detail}"
-        )
-        return
+    decision = strategy.decide(snapshot, position, account, cycle_params,
+                               counters, ai_score=ai_score)
 
     logger.info(
-        f"🚀 [{prefix}] 매수 실행 ({buy_count + 1}/{config.MAX_BUYS_PER_DAY}회차): "
-        f"{plan.qty}주 × {current_price:,.0f}원 = {plan.required_capital:,.0f}원 | {plan.detail}"
+        f"[{prefix} 판단 입력] {ticker} 확정봉 {bars_meta or {'confirmed_bars': 0}} | "
+        f"현재가 {price_fmt(current_price)} | 평단 {price_fmt(avg_price)} | "
+        f"수익률 {profit_rate:.2f}% | 자본 {capped_total:,.0f}원 | AI {ai_score}"
     )
+    logger.info(f"🧭 [{prefix}] {decision.log_line()}")
+
+    if decision.is_sell:
+        _execute_sell(prefix, ticker, decision, market, qty, submit_sell, sell_fn,
+                      refresh_balance)
+        return
+    if decision.is_buy:
+        _execute_buy(prefix, ticker, decision, market, current_price, submit_buy,
+                     buy_fn, fx_rate)
+
+
+def _position_view(ticker: str, market: str | None, qty: float,
+                   avg_price: float) -> "models.PositionView":
+    """
+    보유 상태를 판단용으로 읽는다 (I/O).
+
+    잔고 응답의 수량(`qty`)과 평단(`avg_price`)을 기준으로 하고, DB 에서 진입 시각과
+    고점을 가져온다 — 보유 거래일(시간청산)과 트레일링 스톱에 필요하다.
+
+    **DB 조회 실패를 삼키지 않는다.** 다만 그 때문에 청산 판단 자체를 멈추지는 않는다:
+    진입 시각이 없으면 `exit_rules` 가 시간청산을 건너뛰고 가격 기반 규칙만 쓴다
+    (`exit_rules.trading_days_held` 가 경고를 남긴다).
+    """
+    view = models.PositionView(qty=float(qty or 0.0), avg_price=float(avg_price or 0.0))
+    if not market or view.qty <= 0:
+        return view
+    try:
+        row = db.get_position(_state_conn(), ticker, market) or {}
+    except Exception as e:
+        logger.error(f"⚠️ 포지션 상세 조회 실패 — 진입 시각·고점 없이 판단합니다: {e}")
+        return view
+    return models.PositionView(
+        qty=view.qty, avg_price=view.avg_price,
+        entry_date=row.get("entry_time"),
+        peak_price=row.get("peak_price_since_entry"),
+    )
+
+
+def _hold_decision(ticker: str, reason: str, meta: dict) -> "models.Decision":
+    """보류 결정을 만들어 로그에 남긴다(매수 경로만 막는다)."""
+    decision = models.Decision(models.HOLD, reason=reason, meta=meta)
+    logger.info(f"[판단] {ticker} {decision.log_line()}")
+    return decision
+
+
+def _execute_sell(prefix: str, ticker: str, decision, market: str | None, qty: float,
+                  submit_sell, sell_fn, refresh_balance) -> None:
+    """
+    청산 실행 (I/O). 판단은 이미 끝났다 — 여기서는 **주문 직전 안전 점검만** 한다.
+
+    요구사항 5 의 브로커 잔고 재확인을 반드시 거친다: 판단에 쓴 수량(DB·잔고 응답)과
+    실제 보유가 다르면 **보유하지 않은 수량을 팔려는 주문**이 나갈 수 있다.
+    """
+    reason = decision.reason
+    label = exit_rules.LABELS.get(reason, reason)
+    logger.info(
+        f"📤 {prefix} 청산 판단 — {label}({reason}): {decision.meta.get('detail')} "
+        f"→ {qty:.0f}주 전량 매도"
+    )
+
+    sell_qty = qty
+    if market and refresh_balance is not None:
+        confirmed = _confirm_sell_quantity(prefix, market, ticker, qty, refresh_balance)
+        if confirmed is None:
+            return      # 불일치 — 주문하지 않는다(사람이 확인해야 한다)
+        sell_qty = confirmed
+
+    try:
+        if submit_sell is not None and market:
+            submit_sell(reason, sell_qty)
+        else:
+            _place_sell(prefix, market, ticker, sell_qty, sell_fn, None)
+    except Exception as e:
+        logger.error(f"❌ {prefix} 청산({reason}) 주문 실패: {e}")
+        return
+
+    # 청산은 전량이므로 당일 재진입을 허용한다(부분 매도 상태가 없다).
+    bot_state.set_bought_today(ticker, False)
+
+
+def _execute_buy(prefix: str, ticker: str, decision, market: str | None,
+                 current_price: float, submit_buy, buy_fn, fx_rate: float) -> None:
+    """
+    매수 실행 (I/O). 수량은 `decision.qty`(=`sizing.compute_qty` 결과) 그대로 쓴다.
+
+    **여기서 수량을 다시 계산하지 않는다** — 두 곳에서 계산하면 판단한 수량과 실제
+    주문 수량이 어긋난다(T07 원칙).
+    """
+    qty = int(decision.qty)
+    buy_count = int(bot_state.buy_count_today(ticker))
+    logger.info(
+        f"🚀 [{prefix}] 매수 실행 ({buy_count + 1}/{config.MAX_BUYS_PER_DAY}회차): "
+        f"{qty}주 × {current_price:,.0f}원 | {decision.meta.get('sizing', '')}"
+    )
+
     if market:
-        # T04: 주문은 사전 기록 후 전송하고, **체결이 확인된 뒤에만** 포지션에 반영한다.
         if submit_buy is None:
             logger.error(f"⛔ [{prefix}] 주문 제출 경로가 없어 매수를 건너뜁니다")
             return
         try:
-            submit_buy(int(plan.qty), float(current_price))
+            submit_buy(qty, float(current_price))
         except DuplicateOrderBlocked as e:
             logger.warning(f"⏩ [{prefix}] 중복 주문 차단 — {e}")
             return
@@ -1063,7 +1205,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             f"✅ [{prefix}] 매수 주문 접수 — 당일 {bot_state.buy_count_today(ticker)}회차 "
             "(포지션은 체결 확인 후 반영)"
         )
-    elif buy_fn(plan.qty * current_price):
+    elif buy_fn and buy_fn(qty * float(current_price)):
         bot_state.record_buy(ticker)
         logger.info(f"✅ [{prefix}] 매수 완료 — 당일 {bot_state.buy_count_today(ticker)}회차")
     else:
@@ -1170,23 +1312,6 @@ def run_overseas_cycle(ai_score: int):
 
     buy_fn = _budget_probe(_qty_for_budget)
 
-    def sizing_fn(equity_krw: float, cash_krw: float, price_usd: float,
-                  *, open_positions: int = 0,
-                  current_exposure_krw: float = 0.0) -> sizing.SizingResult:
-        """
-        해외 사이징. 사이징은 원화로 계산하므로 **1주 가격을 원화로 환산**해 넘긴다.
-
-        `price` 는 달러이고 `equity/cash` 는 원화다. 환산 없이 넘기면 1주 가격이
-        1400분의 1로 보여 수량이 1,400배로 나온다 — 그러면 위험 한도가 무의미해진다.
-        """
-        price_krw = float(price_usd) * rate
-        stop = sizing.effective_stop_pct(price_krw)
-        return sizing.compute_qty(
-            equity_krw, cash_krw, price_krw, stop, sizing.params_from_config(),
-            open_positions=open_positions,
-            current_exposure_krw=current_exposure_krw,
-        )
-
     balance_norm = {
         "quantity": balance["quantity"],
         "avg_price": balance["avg_price_usd"],
@@ -1197,15 +1322,18 @@ def run_overseas_cycle(ai_score: int):
     _run_cycle(
         "해외", ticker, balance_norm, current_price, ai_score,
         lambda p: f"${p:,.2f}", None, buy_fn,
+        # `fetch_closes` 는 T08 부터 쓰지 않는다(확정 봉만 쓴다). 시그니처 유지용이다.
         lambda: kis.get_daily_closes(ticker),
         market=MARKET_OVERSEAS, submit_buy=submit_buy, submit_sell=submit_sell,
         status_fn=status_fn, cancel_fn=cancel_fn,
         # 청산 직전 실제 보유 수량 재확인 (요구사항 5). 잔고 API 를 다시 부른다.
         refresh_balance=kis.get_balance,
         refresh_peak=lambda: _refresh_peak(conn, ticker, MARKET_OVERSEAS, current_price),
-        sizing_fn=sizing_fn,
-        # 해외 포지션의 avg_price 는 달러다 — 노출 상한을 원화로 계산하려면 환율이 필요하다.
+        # 해외 포지션의 avg_price 는 **달러**다. 사이징·노출 상한은 원화 기준이므로
+        # 환율을 넘긴다(`strategy.decide` 가 `last_price` 를 원화로 환산한다).
+        # 환산하지 않으면 1주 가격이 1/1400 로 보여 수량이 1400배가 된다(T07).
         fx_rate=rate,
+        broker=broker_module.for_market(MARKET_OVERSEAS, ticker),
     )
 
 
@@ -1260,24 +1388,6 @@ def run_domestic_cycle(ai_score: int):
 
     buy_fn = _budget_probe(_qty_for_budget)
 
-    def sizing_fn(equity_krw: float, cash_krw: float, price_krw: float,
-                  *, open_positions: int = 0,
-                  current_exposure_krw: float = 0.0) -> sizing.SizingResult:
-        """
-        국내 사이징. 국내는 가격이 이미 원화라 환산이 필요 없다.
-
-        ATR 은 넘기지 않는다(`None`) — 일봉 OHLC 조회가 미구현이라 ATR 값의 출처가
-        없다(`history.kis_rows_to_bars` NotImplementedError). `STOP_LOSS_ATR_MULT`
-        가 0(기본)이므로 고정 `STOP_LOSS_PCT` 가 쓰인다.
-        # VERIFY: 일봉 OHLC 를 확보하면 ATR 기반 손절폭을 넘겨야 한다(T06 보고 참고).
-        """
-        stop = sizing.effective_stop_pct(price_krw)
-        return sizing.compute_qty(
-            equity_krw, cash_krw, price_krw, stop, sizing.params_from_config(),
-            open_positions=open_positions,
-            current_exposure_krw=current_exposure_krw,
-        )
-
     balance_norm = {
         "quantity": balance["quantity"],
         "avg_price": balance["avg_price_krw"],
@@ -1288,11 +1398,17 @@ def run_domestic_cycle(ai_score: int):
     _run_cycle(
         "국내", ticker, balance_norm, current_price, ai_score,
         lambda p: f"{p:,.0f}원", None, buy_fn,
+        # `fetch_closes` 는 T08 부터 쓰지 않는다(확정 봉만 쓴다). 시그니처 유지용이다.
         lambda: kd.get_daily_closes(ticker),
         market=MARKET_DOMESTIC, submit_buy=submit_buy, submit_sell=submit_sell,
         status_fn=status_fn, cancel_fn=cancel_fn,
         # 청산 직전 실제 보유 수량 재확인 (요구사항 5). 잔고 API 를 다시 부른다.
         refresh_balance=lambda: kd.get_domestic_balance(ticker),
         refresh_peak=lambda: _refresh_peak(conn, ticker, MARKET_DOMESTIC, current_price),
-        sizing_fn=sizing_fn,
+        # 국내는 가격이 이미 원화라 환산이 필요 없다(fx_rate 기본 1.0).
+        # ATR(`STOP_LOSS_ATR_MULT`)은 켜지 않는다 — 일봉 OHLC 조회가 미구현이라
+        # ATR 값의 출처가 없다(`history.kis_rows_to_bars` NotImplementedError).
+        # 기본 0 이므로 고정 `STOP_LOSS_PCT` 가 쓰인다.
+        # VERIFY: 일봉 OHLC 를 확보하면 ATR 기반 손절폭을 넘겨야 한다(T06 보고 참고).
+        broker=broker_module.for_market(MARKET_DOMESTIC, ticker),
     )
