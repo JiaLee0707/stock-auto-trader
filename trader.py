@@ -143,8 +143,11 @@ def _exposure_snapshot(market: str | None, ticker: str,
     """
     conn = _state_conn()
     if conn is None:
-        # 이 경로는 DB 미사용(`market is None`) 예전 경로에서만 나온다.
-        # 노출을 모르므로 0(제한 없음)으로 둔다 — 그 경로는 상한을 쓰지 않는다.
+        # DB 미사용(`market is None`) 경로에서만 나온다 — 노출을 모르므로 0(제한 없음)으로 둔다.
+        # `market` 이 있는데 DB 가 없으면 **모르는 채로 매수하게 되므로** 실패로 올린다.
+        # 이 예외는 `_run_cycle` 이 잡아 `counters=None` → 매수만 보류로 이어진다(청산은 계속).
+        if market is not None:
+            raise RuntimeError(f"DB 연결 없음 — {market} 노출·보유 종목 수를 알 수 없습니다")
         return 0, 0.0
 
     rate = float(fx_rate or 1.0)
@@ -155,10 +158,7 @@ def _exposure_snapshot(market: str | None, ticker: str,
                 and str(pos.get("market")) == str(market)):
             continue      # 자기 자신 — 추가 매수이지 신규 진입이 아니다
         count += 1
-        try:
-            cost = float(pos.get("qty") or 0.0) * float(pos.get("avg_price") or 0.0)
-        except (TypeError, ValueError):
-            continue
+        cost = float(pos.get("qty") or 0.0) * float(pos.get("avg_price") or 0.0)
         exposure += cost * rate if pos.get("market") == MARKET_OVERSEAS else cost
     return count, exposure
 
@@ -998,7 +998,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             _resolve_open_orders(_state_conn(), market=market, ticker=ticker,
                                  status_fn=status_fn, cancel_fn=cancel_fn)
         except Exception as e:
-            logger.error(f"⛔ [{prefix}] 미확정 주문 조회 실패 — 신규 주문을 건너뜁니다: {e}")
+            logger.error(f"⛔ [{prefix}] 미확정 주문 조회 실패 — 이번 사이클 판단(청산 포함)을 건너뜁니다: {e}")
             return
 
     # ── 데이터 수집: 확정 일봉 (T08 요구사항 3) ───────────
@@ -1031,7 +1031,10 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             exposure_krw=exposure_krw,
         )
     except Exception as e:
-        logger.error(f"❌ [{prefix}] 보유·노출·카운터 조회 실패 — 매수 보류: {e}")
+        # 조회 실패의 **원인을 남긴다** — 예외 타입까지 찍어야 RuntimeError(DB 없음)와
+        # DB 쿼리 오류를 로그만 보고 구분할 수 있다. 매수만 보류되고 청산은 계속된다.
+        logger.critical(f"❌ [{prefix}] 보유·노출·카운터 조회 실패 — 매수만 보류(청산은 계속): "
+                        f"{type(e).__name__}: {e}")
 
     position = _position_view(ticker, market, qty, avg_price)
 
@@ -1075,16 +1078,10 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
     # 청산이 매수보다 우선이므로, 지표를 못 얻었거나 진입 제한에 걸려도 **손절은
     # 그대로 판단된다**(`strategy.decide` 의 판단 순서 1번).
     #
-    # 노출·보유 종목 수를 못 읽었으면(`counters is None`) **판단하지 않는다** —
-    # 진입 제한을 모르는 채 매수 결정을 내리면 상한을 넘길 수 있다. 청산까지 막히지만,
-    # 이 상태는 다음 사이클에서 `_exposure_snapshot` 이 정상이 되면 풀리고,
-    # `reconcile` 중단 플래그가 아니라 그 종목의 매수만 보류하는 국소적 실패다.
-    # (T04 의 "미체결 취소 실패" 차단과 같은 원칙 — 손절은 계속 나가야 한다. 다만
-    #  노출 조회 실패는 DB 자체의 문제라 판단 근거가 아예 없다.)
-    if counters is None:
-        logger.error(f"⛔ [{prefix}] 카운터를 읽지 못해 이번 사이클 판단을 건너뜁니다")
-        return
-
+    # 노출·보유·카운터를 못 읽었으면(`counters is None`) **청산은 계속, 매수만 보류**한다.
+    # 판단은 `strategy.decide()` 안에서 한다 — `counters is None` 이면 청산 판단을 마친 뒤
+    # `HOLD(EXPOSURE_UNAVAILABLE)` 를 돌려준다(판단 순서 2번). 여기서 조기 반환하면
+    # 손절까지 막힌다(T04 의 "미체결 취소 실패" 차단과 같은 원칙 — 손절은 계속 나가야 한다).
     decision = strategy.decide(snapshot, position, account, cycle_params,
                                counters, ai_score=ai_score)
 

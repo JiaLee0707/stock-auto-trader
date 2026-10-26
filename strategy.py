@@ -294,7 +294,7 @@ def decide(snapshot: "models.MarketSnapshot",
            position: "models.PositionView",
            account: "models.AccountView",
            params: dict,
-           counters: "models.DayCounters",
+           counters: "models.DayCounters | None",
            ai_score: int | None = None) -> "models.Decision":
     """
     한 종목의 매매 판단. **순수 함수 — I/O·시간 조회·DB 접근이 없다.**
@@ -309,6 +309,7 @@ def decide(snapshot: "models.MarketSnapshot",
         params: `merge_params()` 로 채운 파라미터 dict.
             `market` 키("overseas"/"domestic")가 있어야 보유 거래일을 셀 수 있다.
         counters: 당일 매수 횟수·직전 매수 시각·보유 종목 수·총 노출.
+            `None`이면 조회 실패 → 매수 보류(오직 `HOLD_EXPOSURE_UNAVAILABLE`). 청산은 계속됨.
         ai_score: AI 시장 점수. **선택 입력**이다 —
             `params["ai_filter_enabled"]` 가 False 면 쓰이지 않고, 필터가 켜져 있는데
             `None` 이면 **매수를 보류한다**(점수를 모르는 채 사면 필터가 무의미해진다).
@@ -316,6 +317,7 @@ def decide(snapshot: "models.MarketSnapshot",
     판단 순서 (우선순위 = 안전성 우선, CLAUDE.md "우선순위 충돌 시")
         1. **청산** — 보유가 있으면 항상 먼저 본다. 손절이 매수보다 우선이다.
         2. 진입 제한 — 당일 한도 → 매수 간격 → 보유 종목 상한.
+            `counters is None`이면 `HOLD_EXPOSURE_UNAVAILABLE` 반환 (매수만 보류).
         3. 진입 조건 — 지표(RSI·볼린저) → 추세 필터.
         4. AI 점수 필터.
         5. 수량 — `sizing.compute_qty`. **0주면 주문하지 않는다**(강제 1주 매수 금지).
@@ -347,6 +349,14 @@ def decide(snapshot: "models.MarketSnapshot",
             return decision
 
     # ── 2~3. 진입 제한 ────────────────────────────────────
+    if counters is None:
+        decision = models.Decision(
+            models.HOLD, reason=models.HOLD_EXPOSURE_UNAVAILABLE,
+            meta={"detail": "노출·보유·카운터 조회 실패 — 매수만 보류"},
+        )
+        logger.info(f"[판단] {snapshot.symbol} {decision.log_line()}")
+        return decision
+
     limit_decision = _check_entry_limits(snapshot, params, counters)
     if limit_decision is not None:
         logger.info(f"[판단] {snapshot.symbol} {limit_decision.log_line()}")
