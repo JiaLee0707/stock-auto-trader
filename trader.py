@@ -1204,6 +1204,30 @@ def _execute_sell(prefix: str, ticker: str, decision, market: str | None, qty: f
     bot_state.set_bought_today(ticker, False)
 
 
+def _may_buy_into(prefix: str, ticker: str, market: str | None) -> bool:
+    """
+    매수가 봇이 관리하지 않는 보유(EXTERNAL) 위에 쌓이지 않게 확인한다 (T03, T08d).
+
+    체결 반영(`_apply_fill_to_position`)은 기존 행의 status 를 보지 않고 OPEN 으로 덮어쓰므로,
+    EXTERNAL 보유 위에 매수가 체결되면 외부 보유분까지 봇 소유가 된다.
+    행이 없거나(첫 진입) OPEN·CLOSED(재진입)이면 True, EXTERNAL 이거나 조회에 실패하면 False.
+    """
+    if not market:
+        return True
+    try:
+        pos = db.get_position(_state_conn(), ticker, market)
+    except Exception as e:
+        logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매수하지 않습니다: {e}")
+        return False
+    if pos is not None and pos.get("status") == "EXTERNAL":
+        logger.warning(
+            f"⛔ {prefix} 외부 보유(EXTERNAL) 종목입니다 — 체결되면 외부 보유분이 봇 소유로 바뀌므로 "
+            "매수하지 않습니다. 직접 정리한 뒤 reconcile 로 상태를 맞추세요."
+        )
+        return False
+    return True
+
+
 def _execute_buy(prefix: str, ticker: str, decision, market: str | None,
                  current_price: float, submit_buy, buy_fn, fx_rate: float) -> None:
     """
@@ -1212,6 +1236,8 @@ def _execute_buy(prefix: str, ticker: str, decision, market: str | None,
     **여기서 수량을 다시 계산하지 않는다** — 두 곳에서 계산하면 판단한 수량과 실제
     주문 수량이 어긋난다(T07 원칙).
     """
+    if not _may_buy_into(prefix, ticker, market):
+        return
     qty = int(decision.qty)
     buy_count = int(bot_state.buy_count_today(ticker))
     logger.info(
