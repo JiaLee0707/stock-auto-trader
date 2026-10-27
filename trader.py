@@ -1135,6 +1135,37 @@ def _hold_decision(ticker: str, reason: str, meta: dict) -> "models.Decision":
     return decision
 
 
+def _may_sell_holding(prefix: str, ticker: str, market: str | None, qty: float) -> bool:
+    """
+    실제 청산 경로에서 이 보유를 팔아도 되는지 DB 로 확인한다 (T03, T08c).
+
+    **허용 목록 방식**이다 — positions 행이 있고 status 가 OPEN 일 때만 True.
+    행이 없거나 EXTERNAL·CLOSED 이거나 조회에 실패하면 False (모르면 팔지 않는다).
+    매도 수량은 브로커 잔고에서 오므로, 이 확인이 없으면 봇이 만들지 않은 보유까지 판다.
+    """
+    if not market:
+        return True      # DB 미사용 예전 경로 — 가드 대상이 아니다
+    try:
+        pos = db.get_position(_state_conn(), ticker, market)
+    except Exception as e:
+        logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매도하지 않습니다: {e}")
+        return False
+    if pos is None:
+        logger.error(
+            f"⛔ {prefix} 브로커에는 {qty:.0f}주가 있으나 positions 기록이 없습니다 — "
+            "봇 소유를 확인할 수 없어 매도하지 않습니다. reconcile 결과를 확인하세요."
+        )
+        return False
+    status = pos.get("status")
+    if status != "OPEN":
+        logger.warning(
+            f"⛔ {prefix} 보유 상태가 {status} 입니다 — 봇이 관리하는 포지션(OPEN)이 아니므로 "
+            f"매도하지 않습니다({qty:.0f}주). 직접 정리한 뒤 reconcile 로 상태를 맞추세요."
+        )
+        return False
+    return True
+
+
 def _execute_sell(prefix: str, ticker: str, decision, market: str | None, qty: float,
                   submit_sell, sell_fn, refresh_balance) -> None:
     """
@@ -1143,6 +1174,9 @@ def _execute_sell(prefix: str, ticker: str, decision, market: str | None, qty: f
     요구사항 5 의 브로커 잔고 재확인을 반드시 거친다: 판단에 쓴 수량(DB·잔고 응답)과
     실제 보유가 다르면 **보유하지 않은 수량을 팔려는 주문**이 나갈 수 있다.
     """
+    if not _may_sell_holding(prefix, ticker, market, qty):
+        return
+
     reason = decision.reason
     label = exit_rules.LABELS.get(reason, reason)
     logger.info(

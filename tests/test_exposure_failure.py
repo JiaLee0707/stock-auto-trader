@@ -107,6 +107,8 @@ def test_stop_loss_still_fires_when_exposure_lookup_fails(conn, bot, monkeypatch
     **이 변경의 핵심.** 청산은 노출 조회에 의존하지 않는다 — 손절이 막히면
     손실이 무한정 커진다. 조회 실패와 무관하게 매도는 나가야 한다.
     """
+    # T08c: 청산 경로는 봇 소유(OPEN) 행이 있어야 매도한다. 노출 실패만 검증하려고 행을 넣는다.
+    db.upsert_position(conn, "379800", "domestic", qty=3.0, avg_price=100.0, status="OPEN")
     _break_exposure(monkeypatch)
     submitted = _run(conn, monkeypatch,
                      balance=_balance(qty=3.0, avg=100.0, profit=-10.0))
