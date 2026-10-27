@@ -266,6 +266,11 @@ MAX_TOTAL_EXPOSURE_PCT = float(os.getenv("MAX_TOTAL_EXPOSURE_PCT", "90.0"))
 # 상한을 넘겨 살 수 있다(sizing.apply_capital_cap 참고).
 CAPITAL_CAP_KRW        = float(os.getenv("CAPITAL_CAP_KRW", "0"))
 
+# ── 알림 (T09a) ─────────────────────────────────────────
+# 둘 다 있어야 텔레그램으로 보낸다. 없으면 알림은 로그만 남긴다(no-op). 값은 출력·로그 금지.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
 # 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)
 MAX_BUYS_PER_DAY       = int(os.getenv("MAX_BUYS_PER_DAY", "2"))
