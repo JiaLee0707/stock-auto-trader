@@ -2337,3 +2337,14 @@ $ .venv/bin/python -m pytest
   `confirmed_bars` 픽스처를 쓰면 편합니다.
 - **`config.BACKTEST_FILL_MODEL`·`ORDER_WINDOW` 는 문서화용 값**이며 실행 코드가 읽지
   않습니다. T11 에서 실제로 소비해야 합니다.
+
+## T08b–T08d 보고 (improve/t08-decide)
+
+**이전 보고 정정**: T08 후속 점검 보고는 코드 수정 없이 "수정 필요"만 적었다. 테스트 수 331은 오류(실제 559). T08 보고서의 "30분 주기"는 오류(실제 `schedule.every(1).hours`, main.py:355). 위 6.항목 4번의 서술은 T08b로 해결됨.
+
+1. **완료 여부**: T08b(6d3c8ec), T08c(10ff144), T08d(b004746) 커밋. 전체 pytest 578 passed.
+2. **변경 파일**: models.py(HOLD_EXPOSURE_UNAVAILABLE), strategy.py(counters=None → 청산 판단 뒤 매수만 보류), trader.py(노출 조회 실패 시 CRITICAL 로그·조기 return 제거, `_exposure_snapshot`이 읽지 못한 값을 0으로 처리하지 않고 예외, `_may_sell_holding`·`_may_buy_into` 추가), tests/test_exposure_failure.py, tests/test_live_path_external.py.
+3. **테스트**: 가드 제거 시 실패하는 것을 직접 확인함. 청산 가드(a·b·d·e·f 실패, c·b2 통과), 매수 가드(h·i 실패, g·h2·j 통과), 노출 실패 시 손절 유지(조기 return 복원 시 손절 테스트 실패 확인).
+4. **VERIFY**: (a) T08 이후 `_check_sell`의 EXTERNAL 가드는 실제 경로에서 호출되지 않았고(`_run_cycle` → `decide` → `_execute_sell`), T08c에서 허용 목록(OPEN만 매도)으로 `_execute_sell`에 추가함. 행이 없을 때도 매도하지 않는 것은 `_check_sell`보다 강화된 정책. (b) `decide()`는 보유 중이라는 이유로 매수를 막지 않음(h2). 추가 매수 허용 여부와 `MAX_POSITION_PCT` 반영은 T11에서 결정. (c) `_check_sell`을 직접 호출하는 test_exposure_failure.py의 두 테스트는 실제 청산 경로의 증거가 아님. T12에서 정리. (d) `broker.py`는 `_run_cycle`에서 호출되지 않는 미사용 코드(trader.py 932·963줄은 인자·docstring뿐). T12에서 통합 또는 삭제 결정. (e) `_resolve_open_orders` 실패 시 청산도 건너뜀(로그 문구만 정정, 동작 유지). (f) `_submit_order`는 SUBMITTED 선기록 뒤에야 `assert_order_allowed`가 실행됨(send_order 안). T09a에서 앞으로 이동.
+5. **사용자 결정 질문**: 보유 중 추가 매수(물타기)를 허용할지(T11 전까지 현 동작 유지).
+6. **다음 Task 영향**: T09a는 `_submit_order` 맨 앞 가드, `_execute_buy`·`_execute_sell`의 `except Exception` 앞에 전용 예외 처리가 필요함.
