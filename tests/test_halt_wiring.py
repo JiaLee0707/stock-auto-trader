@@ -187,11 +187,9 @@ def test_kill_switch_guard_is_the_first_statement_of_submit_order():
     if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
             and isinstance(body[0].value.value, str)):
         body = body[1:]                                      # docstring
-    first = body[0]
-    assert isinstance(first, ast.Expr) and isinstance(first.value, ast.Call), ast.unparse(first)
-    func = first.value.func
-    assert (isinstance(func, ast.Attribute) and func.attr == "assert_order_permitted"
-            and getattr(func.value, "id", None) == "risk"), ast.unparse(first)
+    heads = [ast.unparse(s) for s in body[:2]]
+    assert heads[0].startswith("config.assert_order_allowed("), heads      # 실전 가드(T09a-4)
+    assert heads[1].startswith("risk.assert_order_permitted("), heads      # 킬스위치 게이트
 
 
 # ── B. TradingHalted 는 일반 실패와 구분돼 CRITICAL 로 남는다 ──
@@ -351,3 +349,29 @@ def test_no_instruction_tells_the_user_to_resume_without_a_reason():
         text = path.read_text(encoding="utf-8")
         hits += [f"{path.name}: {b}" for b in banned if b in text]
     assert hits == [], f"사유 없이 해제하는 안내가 남아 있습니다: {hits}"
+
+
+# ── G. 실전 가드(config.assert_order_allowed)도 orders 기록보다 앞이다 (T09a-4) ──
+
+def _refuse_live():
+    raise RuntimeError("실전 확인값 없음(테스트)")
+
+
+def test_live_guard_rejection_leaves_no_order_row(conn, halt_file, monkeypatch):
+    monkeypatch.setattr(config, "assert_order_allowed", _refuse_live)
+    probe = _Probe()
+    with pytest.raises(RuntimeError, match="실전 확인값"):
+        _submit(conn, "SELL", probe, reason="STOP_LOSS")
+    assert _order_count(conn) == 0
+    assert (probe.made, probe.sent) == (0, 0)
+
+
+def test_live_guard_rejection_does_not_block_later_orders(conn, halt_file, monkeypatch):
+    """거부된 주문이 SUBMITTED 행을 남기면 has_open_order 가 이후 주문(손절 포함)을 막는다."""
+    with monkeypatch.context() as m:
+        m.setattr(config, "assert_order_allowed", _refuse_live)
+        with pytest.raises(RuntimeError):
+            _submit(conn, "SELL", _Probe(), reason="STOP_LOSS")
+    probe = _Probe()
+    _submit(conn, "SELL", probe, reason="STOP_LOSS")        # DuplicateOrderBlocked 가 나면 안 된다
+    assert probe.sent == 1 and _order_count(conn) == 1

@@ -397,6 +397,9 @@ def _submit_order(conn, *, market: str, ticker: str, side: str, qty: float,
 
     반환: `orders.id`
     """
+    # 실전 가드 (T01b) — 이것도 **orders 기록보다 앞**이어야 한다. `send_order` 안의 같은 검사는
+    # SUBMITTED 행을 남긴 뒤에야 실행돼, 거부되면 그 행이 고아로 남아 이후 주문(손절 포함)을 막는다.
+    config.assert_order_allowed()
     # 킬스위치 게이트 (T09a) — **orders 기록보다 앞**이어야 한다. 거부된 주문이 SUBMITTED 행을 남기면
     # 그 행이 has_open_order 로 같은 종목·방향의 이후 주문(손절 포함)을 막는다.
     # 거부하면 `risk.TradingHalted` — 호출부(`_execute_buy`/`_execute_sell`)가 CRITICAL 로 남긴다.
