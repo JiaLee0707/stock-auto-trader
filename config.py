@@ -271,6 +271,10 @@ CAPITAL_CAP_KRW        = float(os.getenv("CAPITAL_CAP_KRW", "0"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
+# 비상정지 파일 경로(T09a). 비우면 프로젝트 루트의 HALT. 상대경로는 프로젝트 루트 기준(작업 디렉터리와 무관).
+# 이 파일이 있으면 매수·매도 모두 막힌다. 사람이 직접 지워야 풀린다.
+HALT_FILE = os.getenv("HALT_FILE", "").strip()
+
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
 # 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)
 MAX_BUYS_PER_DAY       = int(os.getenv("MAX_BUYS_PER_DAY", "2"))

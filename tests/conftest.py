@@ -62,3 +62,19 @@ def confirmed_bars(tmp_path, monkeypatch):
         return rows
 
     return _write
+
+
+# ── T09a: 테스트가 실제 알림·실제 HALT 파일에 닿지 않게 한다 ─────────────
+import pytest as _pytest_t09a  # noqa: E402
+
+
+@_pytest_t09a.fixture(autouse=True)
+def _isolate_alerts_and_halt_file(monkeypatch, tmp_path):
+    """
+    - 텔레그램 설정을 비운다: `.env` 에 토큰을 넣어도 테스트가 실제 메시지를 보내지 않는다.
+    - HALT 파일 경로를 임시 폴더로 돌린다: 프로젝트 루트에 HALT 파일이 있어도 테스트가 영향받지 않는다.
+    """
+    import config
+    monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setattr(config, "TELEGRAM_CHAT_ID", "")
+    monkeypatch.setattr(config, "HALT_FILE", str(tmp_path / "HALT_not_present"))

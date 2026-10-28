@@ -21,6 +21,7 @@ from datetime import datetime
 
 import config
 import db
+import notifier
 
 logger = logging.getLogger("bot")
 
@@ -261,23 +262,67 @@ def _apply_autofix(conn, result: dict) -> None:
         )
 
 
-def halt_trading(conn, reason: str) -> None:
+HALT_KINDS = ("STATE", "RISK")
+# STATE: 상태를 믿을 수 없다(브로커↔DB 불일치 등) → 모든 주문 차단.
+# RISK : 손실 한도 → 신규 매수만 차단하고 청산(손절)은 계속한다.
+
+
+def _notify(level: str, title: str, message: str) -> None:
+    """알림을 보낸다. 알림이 실패해도 중단 처리는 이미 끝나 있어야 하므로 예외를 올리지 않는다."""
+    try:
+        notifier.notify(level, title, message)
+    except Exception as e:
+        # str(e) 는 쓰지 않는다 — 예외 메시지에 URL(토큰)이 들어 있을 수 있다.
+        logger.error(f"[알림] 알림 호출 실패 — {type(e).__name__}")
+
+
+def halt_trading(conn, reason: str, kind: str = "STATE", *, actor: str = "bot",
+                 details: dict | None = None) -> bool:
     """
     신규 매매 중단 플래그를 세운다. 매매 판단은 시작 전에 이 값을 봐야 한다.
 
-    TODO(T09): 사용자 알림(텔레그램 등) 연결 지점. 지금은 로그만 남긴다.
+    kind: "STATE"(기본, 기존 동작 — 모든 주문 차단) 또는 "RISK"(신규 매수만 차단).
+
+    상태가 **바뀔 때만** 이력(halt_events)과 알림을 남긴다.
+      - 중단 중이 아니었다 → 새 중단
+      - RISK 중단 중에 STATE 발생 → STATE 로 격상 (더 강한 쪽이 이긴다)
+    이미 같거나 더 강한 중단 중이면 아무것도 바꾸지 않는다(매 사이클 알림 반복 방지).
+
+    순서: 상태 기록 → 로그 → 알림. 알림이 실패해도 상태 기록은 이미 끝나 있다.
+    반환: 상태가 바뀌었으면 True.
     """
-    db.set_kv(conn, db.KV_TRADING_HALTED, "1")
-    db.set_kv(conn, db.KV_HALT_REASON, reason)
-    logger.error(f"🚨 신규 매매 중단 플래그 설정 — {reason}")
-    # TODO(T09): 여기서 알림을 보낸다 (텔레그램/슬랙 등)
+    if kind not in HALT_KINDS:
+        raise ValueError(f"허용되지 않는 중단 종류: {kind!r} (허용: {HALT_KINDS})")
+    reason = str(reason or "").strip() or "사유 미기록"
 
+    current = halt_kind(conn)       # 중단 중이 아니면 None
+    if current is not None and (current == "STATE" or kind == "RISK"):
+        logger.warning(
+            f"[중단] 이미 {current} 중단 중이라 상태를 바꾸지 않습니다 — 추가 사유: [{kind}] {reason}"
+        )
+        return False
 
-def resume_trading(conn, reason: str = "수동 해제") -> None:
-    """중단 플래그를 해제한다. 불일치를 사람이 확인한 뒤 호출한다."""
-    db.set_kv(conn, db.KV_TRADING_HALTED, "0")
-    db.set_kv(conn, db.KV_HALT_REASON, None)
-    logger.warning(f"✅ 신규 매매 중단 플래그 해제 — {reason}")
+    try:
+        db.set_kv(conn, db.KV_HALT_KIND, kind)
+        db.set_kv(conn, db.KV_HALT_REASON, reason)
+        db.set_kv(conn, db.KV_HALT_AT, db.now_iso())
+        db.set_kv(conn, db.KV_TRADING_HALTED, "1")
+        db.record_halt_event(conn, "HALT", kind=kind, reason=reason, actor=actor, details=details)
+    except Exception as e:
+        logger.critical(
+            f"🚨 중단 상태를 DB 에 기록하지 못했습니다 ({type(e).__name__}: {e}) — [{kind}] {reason}"
+        )
+        _notify("CRITICAL", "중단 기록 실패",
+                f"[{kind}] {reason}\n중단 상태를 DB 에 기록하지 못했습니다({type(e).__name__}). 직접 확인이 필요합니다.")
+        raise
+
+    logger.critical(f"🚨 신규 매매 중단 플래그 설정 — [{kind}] {reason}")
+    scope = "모든 주문(매수·매도) 차단" if kind == "STATE" else "신규 매수만 차단(청산은 계속)"
+    title = f"신규 매매 중단 [{kind}]" if current is None else f"중단 격상 [{current}→{kind}]"
+    _notify("CRITICAL", title,
+            f"{reason}\n- {scope}\n- 확인: python -m risk status\n"
+            '- 해제: python -m risk resume --reason "확인한 내용"')
+    return True
 
 
 def is_trading_halted(conn) -> bool:
@@ -288,6 +333,57 @@ def is_trading_halted(conn) -> bool:
 def halt_reason(conn) -> str | None:
     """중단 사유(없으면 None)."""
     return db.get_kv(conn, db.KV_HALT_REASON)
+
+
+def halt_kind(conn) -> str | None:
+    """
+    중단 종류. 중단 중이 아니면 None.
+
+    종류가 기록돼 있지 않거나 알 수 없는 값이면 "STATE" 로 본다 — T09a 이전에 세워진
+    플래그나 손상된 값은 가장 엄격한 쪽(모든 주문 차단)으로 해석한다(실패 시 닫힘).
+    """
+    if not is_trading_halted(conn):
+        return None
+    kind = db.get_kv(conn, db.KV_HALT_KIND)
+    return kind if kind in HALT_KINDS else "STATE"
+
+
+def halt_since(conn) -> str | None:
+    """중단 시작 시각(ISO). 중단 중이 아니거나 기록이 없으면 None."""
+    if not is_trading_halted(conn):
+        return None
+    return db.get_kv(conn, db.KV_HALT_AT)
+
+
+def resume_trading(conn, reason: str | None = None, *, actor: str = "manual") -> bool:
+    """
+    중단 플래그를 해제한다. **사람이 확인한 뒤에만 호출한다** — 자동 호출 금지
+    (테스트가 소스를 스캔해 risk.py 밖의 호출을 막는다).
+
+    이력(halt_events)에 RESUME 을 남긴다. 사유가 없으면 WARNING 을 남기고 "사유 미기록" 으로
+    기록한다(CLI 는 사유가 없으면 아예 거부한다). 중단 중이 아니면 아무것도 하지 않고 False.
+    """
+    text = str(reason or "").strip()
+    if not text:
+        logger.warning(
+            '⚠️ 재개 사유가 없습니다 — "사유 미기록"으로 기록합니다. '
+            'CLI 를 쓰면 사유가 필수입니다: python -m risk resume --reason "..."'
+        )
+        text = "사유 미기록"
+
+    kind = halt_kind(conn)
+    if kind is None:
+        logger.info("[중단] 중단 상태가 아니라 재개할 것이 없습니다")
+        return False
+
+    # 이력을 먼저 남긴다 — 기록 없이 해제만 되는 상태가 생기면 안 된다.
+    db.record_halt_event(conn, "RESUME", kind=kind, reason=text, actor=actor)
+    db.set_kv(conn, db.KV_TRADING_HALTED, "0")
+    db.set_kv(conn, db.KV_HALT_REASON, None)
+    db.set_kv(conn, db.KV_HALT_KIND, None)
+    db.set_kv(conn, db.KV_HALT_AT, None)
+    logger.warning(f"✅ 신규 매매 중단 플래그 해제 — [{kind}] {text}")
+    return True
 
 
 def reconcile(conn, *, holdings: list[dict] | None = None,

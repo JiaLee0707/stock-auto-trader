@@ -88,6 +88,9 @@ Python 버전: `.python-version` = `3.12.15`
 | `MAX_OPEN_POSITIONS` | `2` | 동시 보유 종목 수 상한. 도달 시 신규 진입만 차단(청산은 계속) (T07) |
 | `MAX_TOTAL_EXPOSURE_PCT` | `90.0` | 총 노출(보유 평가액 합계) 상한 (자산 대비 %) (T07) |
 | `CAPITAL_CAP_KRW` | `0` | 사용 자본 상한(원). **`0` = 상한 없음**. 설정하면 equity와 cash를 **둘 다** 이 값으로 제한해 모의투자에서도 실전 규모로 사이징 (T07) |
+| `TELEGRAM_BOT_TOKEN` | (없음) | 텔레그램 봇 토큰. **`TELEGRAM_CHAT_ID`와 둘 다 있어야** 알림을 보낸다. 없으면 알림은 로그로만 남는다. 값은 `.env`에만 두고 채팅·로그에 붙이지 않는다 (T09a) |
+| `TELEGRAM_CHAT_ID` | (없음) | 알림을 받을 텔레그램 채팅 ID (T09a) |
+| `HALT_FILE` | (프로젝트 루트의 `HALT`) | 비상정지 파일 경로. 이 파일이 있으면 매수·매도 모두 중단. 상대경로는 프로젝트 루트 기준. 사람이 직접 지워야 풀린다 (T09a) |
 | `DIP_THRESHOLD` | `-1.5` | 지표 폴백 시 평단 대비 매수 하락률(%) |
 | `USE_INDICATORS` | `True` | RSI+볼린저 지표 진입 사용 |
 | `RSI_PERIOD` | `14` | RSI 기간 |

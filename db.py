@@ -73,8 +73,10 @@ POSITION_STATUSES = ("OPEN", "CLOSED", "EXTERNAL")
 KV_TRADING_HALTED = "trading_halted"
 KV_HALT_REASON = "trading_halted_reason"
 KV_PEAK_EQUITY = "peak_equity"
+KV_HALT_KIND = "trading_halted_kind"      # "STATE" | "RISK" (T09a)
+KV_HALT_AT = "trading_halted_at"          # 중단 시작 시각 (T09a)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # 잠금 대기 시간(ms). 잠긴 DB 를 오래 붙잡고 있지 않도록 짧게 잡는다.
 # 이 값이 곧 "잠김을 얼마나 기다린 뒤 실패로 알릴지"이므로 테스트에서 낮춰 검증한다.
@@ -168,6 +170,19 @@ _MIGRATIONS: list[tuple[int, str]] = [
     # 근거: docs/kis_api_fields.md §1 Response Body / §3 Request Body.
     (2, """
     ALTER TABLE orders ADD COLUMN broker_org_no TEXT;
+    """),
+    (3, """
+    -- T09a: 킬스위치 중단·재개 이력. append-only — 행을 고치거나 지우지 않는다.
+    CREATE TABLE IF NOT EXISTS halt_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           TEXT NOT NULL,
+        event        TEXT NOT NULL CHECK (event IN ('HALT', 'RESUME')),
+        kind         TEXT,
+        reason       TEXT,
+        actor        TEXT,
+        details_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_halt_events_ts ON halt_events(ts);
     """),
 ]
 
@@ -650,3 +665,32 @@ def max_equity(conn: sqlite3.Connection) -> float | None:
     """기록된 자산 최고값(고점 대비 낙폭 계산용)."""
     row = conn.execute("SELECT MAX(total_equity) AS m FROM equity_log").fetchone()
     return float(row["m"]) if row and row["m"] is not None else None
+
+
+# ── halt_events (T09a) ────────────────────────────────────
+
+HALT_EVENTS = ("HALT", "RESUME")
+
+
+def record_halt_event(conn: sqlite3.Connection, event: str, *, kind: str | None,
+                      reason: str | None, actor: str, details: dict | None = None,
+                      at: str | None = None) -> None:
+    """킬스위치 중단·재개 이력을 남긴다. 이력은 고치거나 지우지 않는다(append-only)."""
+    if event not in HALT_EVENTS:
+        raise ValueError(f"허용되지 않는 중단 이벤트: {event!r} (허용: {HALT_EVENTS})")
+    details_json = (json.dumps(details, ensure_ascii=False, sort_keys=True)
+                    if details else None)
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO halt_events (ts, event, kind, reason, actor, details_json) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (at or now_iso(), event, kind, reason, actor, details_json),
+        )
+
+
+def list_halt_events(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """중단·재개 이력, 최신순."""
+    rows = conn.execute(
+        "SELECT * FROM halt_events ORDER BY id DESC LIMIT ?", (int(limit),)
+    ).fetchall()
+    return [dict(r) for r in rows]
