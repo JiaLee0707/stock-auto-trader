@@ -408,10 +408,9 @@ def reconcile(conn, *, holdings: list[dict] | None = None,
     # 조용히 지나가면 봇이 돌고 있는데 매매만 안 되는 상태를 사용자가 눈치채지 못한다.
     if is_trading_halted(conn):
         logger.critical(
-            f"🚨 신규 매매 중단 중 — 사유: {halt_reason(conn) or '사유 미기록'}\n"
-            f"   해제: 불일치를 확인한 뒤 아래를 실행하세요.\n"
-            f"   .venv/bin/python -c \"import db, reconcile; c=db.open_db(); "
-            f"reconcile.resume_trading(c); c.close()\""
+            f"🚨 신규 매매 중단 중 [{halt_kind(conn)}] — 사유: {halt_reason(conn) or '사유 미기록'}\n"
+            f"   확인: python -m risk status\n"
+            f"   해제: 원인을 확인한 뒤 python -m risk resume --reason \"확인한 내용\""
         )
 
     db_positions = db.list_positions(conn, status="OPEN")
@@ -447,7 +446,7 @@ def reconcile(conn, *, holdings: list[dict] | None = None,
         if is_trading_halted(conn):
             logger.warning(
                 f"[reconcile] 불일치는 해소됐지만 중단 플래그가 남아 있습니다 "
-                f"(사유: {halt_reason(conn)}). 확인 후 resume_trading() 으로 해제하세요."
+                f"(사유: {halt_reason(conn)}). 확인 후 python -m risk resume --reason \"...\" 로 해제하세요."
             )
         return result
 

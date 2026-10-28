@@ -51,6 +51,7 @@ import kis_domestic as kd
 import kis_overseas as kis
 import models
 import reconcile
+import risk
 import sizing
 import strategy
 from state import bot_state, get_bot_state
@@ -396,6 +397,11 @@ def _submit_order(conn, *, market: str, ticker: str, side: str, qty: float,
 
     반환: `orders.id`
     """
+    # 킬스위치 게이트 (T09a) — **orders 기록보다 앞**이어야 한다. 거부된 주문이 SUBMITTED 행을 남기면
+    # 그 행이 has_open_order 로 같은 종목·방향의 이후 주문(손절 포함)을 막는다.
+    # 거부하면 `risk.TradingHalted` — 호출부(`_execute_buy`/`_execute_sell`)가 CRITICAL 로 남긴다.
+    risk.assert_order_permitted(conn, side, reason)
+
     if db.has_open_order(conn, symbol=ticker, market=market, side=side):
         existing = db.list_open_orders(conn, symbol=ticker, market=market, side=side)
         ids = ", ".join(f"#{o['id']}({o['status']})" for o in existing)
@@ -620,23 +626,35 @@ def run_trading_cycle(ai_score: int, overseas_open: bool = True, domestic_open: 
     """
     # 신규 매매 중단 플래그 확인 (T03). 브로커 ↔ DB 불일치가 해소되지 않았으면
     # 상태를 모르는 채 주문하지 않도록 여기서 멈춘다.
-    # TODO(T09): 중단 시 사용자 알림 연결.
+    # 알림은 중단이 걸리는 시점에 reconcile.halt_trading 이 보낸다(T09a). 여기서는 매 사이클 로그만 남긴다.
     try:
         conn = get_bot_state().conn
     except Exception as e:
         logger.error(f"❌ 상태 저장소 접근 실패 — 매매 사이클을 건너뜁니다: {e}")
         return
 
-    if reconcile.is_trading_halted(conn):
-        # 매 사이클 CRITICAL 로 남긴다 — 조용히 지나가면 "봇은 도는데 매매만 안 되는"
-        # 상태를 사용자가 눈치채지 못한다. 해제 방법은 실행 가능한 명령으로 적는다 (T04).
+    # 킬스위치 게이트 (T09a). reconcile 중단 플래그와 HALT 파일을 함께 본다.
+    #   FULL_STOP        모든 주문이 막힌다(STATE 중단·HALT 파일·상태 읽기 실패) → 사이클을 건너뛴다.
+    #   ENTRIES_BLOCKED  RISK 중단 → 신규 매수만 막는다. **청산(손절)이 돌아야 하므로 사이클은 계속한다.**
+    # 매 사이클 CRITICAL 로 남긴다 — 조용히 지나가면 "봇은 도는데 매매만 안 되는" 상태를
+    # 사용자가 눈치채지 못한다. 해제 방법은 실행 가능한 명령으로 적는다 (T04).
+    gate, detail = risk.gate_status(conn)
+    if gate == risk.FULL_STOP:
         logger.critical(
-            f"🚨 신규 매매 중단 중 — 사유: {reconcile.halt_reason(conn) or '사유 미기록'}\n"
-            "   해제: 불일치를 확인한 뒤 아래를 실행하세요.\n"
-            "   .venv/bin/python -c \"import db, reconcile; c=db.open_db(); "
-            "reconcile.resume_trading(c); c.close()\""
+            f"🚨 매매 전면 중단 중 — {detail}\n"
+            "   매수·매도 주문이 모두 막혀 있습니다(보유 포지션도 정리되지 않습니다).\n"
+            "   확인: python -m risk status\n"
+            "   해제: 원인을 확인한 뒤 python -m risk resume --reason \"확인한 내용\" "
+            "(HALT 파일이 있으면 직접 삭제)"
         )
         return
+    if gate == risk.ENTRIES_BLOCKED:
+        logger.critical(
+            f"🚨 신규 매수 중단 중 — {detail}\n"
+            "   청산(손절)은 계속 실행됩니다.\n"
+            "   확인: python -m risk status\n"
+            "   해제: 원인을 확인한 뒤 python -m risk resume --reason \"확인한 내용\""
+        )
 
     if not config.IS_OVERSEAS_ENABLED:
         pass    # 해외 운용 비활성 (소액 자본 등)
@@ -756,7 +774,7 @@ def _trigger_reconcile_check(what: str) -> None:
     logger.critical(
         f"🚨 매도 전 수량 불일치 감지 — {what}\n"
         f"   reconcile 대조를 실행합니다. 불일치가 확인되면 신규 매매가 중단됩니다.\n"
-        f"   해제: 불일치를 확인한 뒤 `reconcile.resume_trading(conn)` 을 실행하세요."
+        f"   확인: python -m risk status / 해제: python -m risk resume --reason \"확인한 내용\""
     )
     try:
         reconcile.reconcile(_state_conn())
@@ -1061,6 +1079,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         "market": market,
         "fx_rate": fx_rate,
         "exit_price": exit_price,
+        "entries_blocked_reason": _entries_blocked_reason(prefix, market),
         # 조회 실패(`False`)와 캐시 없음(빈 DataFrame)을 `strategy` 가 구분할 수 있게 알린다.
         "bars_received": bars_received,
         "bars_unavailable_detail": (
@@ -1196,12 +1215,39 @@ def _execute_sell(prefix: str, ticker: str, decision, market: str | None, qty: f
             submit_sell(reason, sell_qty)
         else:
             _place_sell(prefix, market, ticker, sell_qty, sell_fn, None)
+    except risk.TradingHalted as e:
+        logger.critical(f"🚨 {prefix} 킬스위치가 청산({reason}) 주문을 막았습니다 — {e}")
+        return
     except Exception as e:
         logger.error(f"❌ {prefix} 청산({reason}) 주문 실패: {e}")
         return
 
     # 청산은 전량이므로 당일 재진입을 허용한다(부분 매도 상태가 없다).
     bot_state.set_bought_today(ticker, False)
+
+
+def _entries_blocked_reason(prefix: str, market: str | None) -> str | None:
+    """
+    킬스위치가 신규 매수를 막고 있으면 그 사유, 아니면 None (T09a).
+
+    `decide()` 에 `entries_blocked_reason` 으로 넘긴다 — 청산을 판단한 뒤 매수만 보류한다.
+    **FULL_STOP(전면 중단)도 여기서는 매수 보류 사유다**: 사이클 자체는 `run_trading_cycle` 이
+    이미 걸러내지만, 그 뒤에 HALT 파일이 생기거나 상태를 못 읽게 돼도 매수가 나가면 안 된다.
+    매도는 `_submit_order` 의 게이트(`risk.assert_order_permitted`)가 마지막으로 막는다.
+    DB 를 쓰지 않는 예전 경로(`market is None`)는 대상이 아니다.
+    """
+    if not market:
+        return None
+    try:
+        gate, detail = risk.gate_status(_state_conn())
+    except Exception as e:
+        logger.critical(
+            f"🚨 [{prefix}] 중단 상태를 읽지 못했습니다({type(e).__name__}) — 신규 매수를 보류합니다"
+        )
+        return "중단 상태를 읽지 못해 신규 매수를 보류합니다"
+    if gate == risk.OPEN:
+        return None
+    return detail or gate
 
 
 def _may_buy_into(prefix: str, ticker: str, market: str | None) -> bool:
@@ -1253,6 +1299,9 @@ def _execute_buy(prefix: str, ticker: str, decision, market: str | None,
             submit_buy(qty, float(current_price))
         except DuplicateOrderBlocked as e:
             logger.warning(f"⏩ [{prefix}] 중복 주문 차단 — {e}")
+            return
+        except risk.TradingHalted as e:
+            logger.critical(f"🚨 [{prefix}] 킬스위치가 매수 주문을 막았습니다 — {e}")
             return
         except Exception as e:
             logger.error(f"❌ [{prefix}] 매수 주문 실패 — 체결 확인 전이므로 횟수 미기록: {e}")

@@ -36,6 +36,7 @@ HOLD_INDICATOR_UNAVAILABLE = "INDICATOR_UNAVAILABLE"  # 지표 계산 불가(데
 HOLD_TREND_FILTER = "TREND_FILTER_UNAVAILABLE"        # SMA(200) 계산 불가
 HOLD_NO_CAPITAL = "INSUFFICIENT_CAPITAL"     # 수량 0 (sizing 이 정한 사유)
 HOLD_EXPOSURE_UNAVAILABLE = "EXPOSURE_UNAVAILABLE"  # 노출·보유·카운터 조회 실패
+HOLD_TRADING_HALTED = "TRADING_HALTED"          # 킬스위치가 신규 매수를 막는 중 (T09a)
 
 # 청산 판단을 하지 않은 이유.
 HOLD_NO_POSITION = "NO_POSITION"             # 보유 없음 → 청산 대상 아님

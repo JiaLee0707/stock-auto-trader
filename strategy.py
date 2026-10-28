@@ -308,6 +308,9 @@ def decide(snapshot: "models.MarketSnapshot",
         account: 자본(원화, `CAPITAL_CAP_KRW` 적용 후).
         params: `merge_params()` 로 채운 파라미터 dict.
             `market` 키("overseas"/"domestic")가 있어야 보유 거래일을 셀 수 있다.
+            선택 키 `entries_blocked_reason`(T09a): 값이 있으면 킬스위치가 신규 매수를 막는 중이다 —
+            청산을 판단한 뒤 HOLD(TRADING_HALTED) 로 보류한다. 키가 없거나 None·빈 문자열이면 막지 않는다.
+            호출부(`trader._run_cycle`)가 항상 명시적으로 넘기고, 백테스트는 넘기지 않는다.
         counters: 당일 매수 횟수·직전 매수 시각·보유 종목 수·총 노출.
             `None`이면 조회 실패 → 매수 보류(오직 `HOLD_EXPOSURE_UNAVAILABLE`). 청산은 계속됨.
         ai_score: AI 시장 점수. **선택 입력**이다 —
@@ -316,6 +319,7 @@ def decide(snapshot: "models.MarketSnapshot",
 
     판단 순서 (우선순위 = 안전성 우선, CLAUDE.md "우선순위 충돌 시")
         1. **청산** — 보유가 있으면 항상 먼저 본다. 손절이 매수보다 우선이다.
+           킬스위치가 걸려 있어도 청산은 그대로 판단한다 (T09a).
         2. 진입 제한 — 당일 한도 → 매수 간격 → 보유 종목 상한.
             `counters is None`이면 `HOLD_EXPOSURE_UNAVAILABLE` 반환 (매수만 보류).
         3. 진입 조건 — 지표(RSI·볼린저) → 추세 필터.
@@ -347,6 +351,18 @@ def decide(snapshot: "models.MarketSnapshot",
         if decision is not None:
             logger.info(f"[판단] {snapshot.symbol} {decision.log_line()}")
             return decision
+
+    # ── 킬스위치: 신규 매수 중단 (T09a) ───────────────────
+    # 청산은 위에서 이미 판단했다. 킬스위치가 걸려 있으면(호출부가 사유를 넘긴다) 사유만 남기고
+    # 매수를 보류한다. `decide()` 는 순수하다 — 중단 상태를 직접 읽지 않는다.
+    blocked = params.get("entries_blocked_reason")
+    if blocked:
+        decision = models.Decision(
+            models.HOLD, reason=models.HOLD_TRADING_HALTED,
+            meta={"detail": str(blocked)},
+        )
+        logger.info(f"[판단] {snapshot.symbol} {decision.log_line()}")
+        return decision
 
     # ── 2~3. 진입 제한 ────────────────────────────────────
     if counters is None:
