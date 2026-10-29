@@ -15,13 +15,15 @@
 .venv/bin/python -m pip freeze > requirements.txt   # 패키지 변경 후 갱신
 ```
 
-## 자동화 테스트: 아직 없음
+## 자동화 테스트
 
-이 저장소에는 `tests/` 디렉터리도, `pytest.ini`/`pyproject.toml`도 없습니다.
-`pytest`는 설치되어 있지 않습니다 (`requirements.txt`에 없음).
+실행: `.venv/bin/python -m pytest -o addopts="" -q`
 
-CLAUDE.md의 "변경마다 pytest 작성·실행" 규칙을 지키려면 **T01 이후 테스트 인프라를 먼저 만들어야 합니다.**
-그때까지의 검증은 아래 수동 절차뿐이며, 이는 "테스트 통과"가 아닙니다.
+테스트는 `tests/` 에 있습니다. 개발 전용 의존성은 `requirements-dev.txt` 에 있습니다.
+
+`tests/conftest.py` 가 모든 테스트에서 DB 경로, 일봉 캐시 경로, 텔레그램 설정, HALT 파일 경로를 임시 위치로 돌려, 테스트가 실제 `data/bot.db`·`data/bars`·텔레그램·프로젝트 루트의 `HALT` 에 닿지 않게 합니다.
+
+아래 "수동 검증 절차"는 환경 점검용이며 테스트 통과를 대신하지 않습니다.
 
 ### 수동 검증 절차
 
@@ -30,7 +32,7 @@ CLAUDE.md의 "변경마다 pytest 작성·실행" 규칙을 지키려면 **T01 �
 .venv/bin/python -m py_compile *.py
 
 # 2. 임포트 검사 (config 를 읽으므로 .env 가 없으면 경고만 출력됨)
-.venv/bin/python -c "import config, state, indicators, kis_overseas, kis_domestic, ai_analyzer, trader, main; print('imports OK')"
+.venv/bin/python -c "import config, db, state, reconcile, risk, notifier, models, strategy, exit_rules, sizing, indicators, history, market_calendar, broker, kis_overseas, kis_domestic, ai_analyzer, trader, main; print('imports OK')"
 
 # 3. 설정값 확인 (민감값은 출력하지 않음)
 .venv/bin/python -c "import config; print(config.IS_MOCK, config.TARGET_TICKER, config.DOMESTIC_TICKER)"
