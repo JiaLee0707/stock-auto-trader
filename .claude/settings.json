@@ -4,7 +4,12 @@
             "Read(./token_cache*.json)",
             "Bash(.venv/bin/python main.py:*)",
             "Bash(python main.py:*)",
-            "Bash(python3 main.py:*)"
+            "Bash(python3 main.py:*)",
+            "Read(./.env)",
+            "Read(./.env.*)",
+            "Read(./.envrc)",
+            "Bash(.venv/bin/python:*)",
+            "Bash(.venv/bin/pytest:*)"
         ]
     }
 }
