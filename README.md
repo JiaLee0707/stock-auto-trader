@@ -10,7 +10,7 @@ macOS 로컬에서 `schedule`로 1시간 주기 실행.
 - 매도 체결이 **한 번도 발생한 적이 없음** — 익절/손절 로직이 실제로 발동한 실적 없음
 - 이 사실은 `logs/bot.log`로 확인 가능. 2026-10-18 기준 "매도"가 들어간 줄 39건 중 13건이 `매도 조건 미충족`이고, 매도 주문 실행 기록은 0건이다 (`grep -cE "매도 주문 완료" logs/bot.log` → 0, 매수 주문 완료는 9건)
 - 자동화 테스트는 **T01에서 최소 도입** (pytest). 지표 특성화·실전 가드에서 시작해 T08에서 판단 로직 전체(`tests/test_decide.py`)로 넓어짐
-- 실전 가드가 **T01/T01b에서 추가됨**. `IS_MOCK_TRADING=false`(실전)이고 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면 시작 즉시 종료하며, 주문 함수 4개도 직접 호출 시 차단 (`tests/test_live_guard.py`)
+- 실전 가드가 **T01/T01b에서 추가됨**. `IS_MOCK_TRADING=false`(실전)이고 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면 시작 즉시 종료하며, 주문 함수(`buy_shares`·`sell_all`·`buy_domestic`·`sell_domestic_all`·`send_order`·`cancel_order`)도 직접 호출 시 차단 (`tests/test_live_guard.py`)
 
 ## 판단과 실행의 분리 (T08)
 
@@ -143,26 +143,40 @@ grep "현재 모드" logs/bot.log | tail -1    # 예: 🔒 현재 모드: 모의
 ```
 
 **실전 가드**: `IS_MOCK_TRADING=false`(실전)인데 `CONFIRM_LIVE=YES_I_UNDERSTAND`가 없으면
-어떤 API 호출보다 먼저 종료합니다. 또한 주문 함수 4개가 각자 시작 시 같은 검사를 하므로,
+어떤 API 호출보다 먼저 종료합니다. 또한 주문 함수(`buy_shares`·`sell_all`·`buy_domestic`·`sell_domestic_all`·`send_order`·`cancel_order`)가 각자 시작 시 같은 검사를 하고 `_submit_order`도 `orders` 기록 전에 같은 검사를 하므로,
 `main()`을 거치지 않고 직접 호출돼도 주문이 나가지 않습니다.
 
-## 매매 중단 플래그 해제 방법
+## 매매 중단과 재개 (T03·T09a)
 
-브로커 보유와 DB 포지션이 어긋나면(`reconcile`) 봇이 **신규 매매를 멈춥니다.**
-이때 매 사이클마다 `🚨 신규 매매 중단 중` CRITICAL 로그가 사유와 함께 찍힙니다.
+봇은 상태를 믿을 수 없을 때 스스로 멈춥니다. 멈춘 이유에 따라 막히는 범위가 다릅니다.
+
+| 종류 | 언제 | 막히는 것 |
+|---|---|---|
+| STATE | 브로커 보유와 DB 포지션이 어긋나는 등(`reconcile`) 상태를 믿을 수 없을 때 | 매수·매도 모두 (보유 종목도 정리되지 않음) |
+| RISK | 손실 한도. **이 중단을 거는 코드는 T09b에서 추가됩니다(지금은 없음)** | 신규 매수만 (청산·손절은 계속) |
+| HALT 파일 | 사람이 프로젝트 루트(또는 `HALT_FILE` 경로)에 파일을 만들었을 때 | 매수·매도 모두 |
+
+중단 상태나 HALT 파일을 읽다가 실패해도 모든 주문을 막습니다(실패 시 닫힘).
+중단 중에는 매 사이클 `🚨` CRITICAL 로그가 사유와 해제 방법과 함께 찍힙니다.
 
 ```bash
-grep "신규 매매 중단" logs/bot.log | tail -1
+grep "중단 중" logs/bot.log | tail -1
 ```
 
-**자동으로 해제되지 않습니다.** 로그로 불일치 내역을 확인한 뒤 사람이 직접 해제해야 합니다.
+**자동으로 해제되지 않습니다.** 로그로 원인을 확인한 뒤 사람이 직접 해제해야 합니다.
 
 ```bash
-# 1) 사유와 현재 상태 확인
-.venv/bin/python -c "import db, reconcile; c=db.open_db(); print(reconcile.is_trading_halted(c), reconcile.halt_reason(c)); print(db.list_positions(c)); c.close()"
+.venv/bin/python -m risk status                           # 게이트, 중단 종류·사유·시작 시각, HALT 파일, 최근 이력
+.venv/bin/python -m risk resume --reason "확인한 내용"      # 사유 필수. 이력(halt_events)에 남는다
+```
 
-# 2) 불일치를 확인·정리한 뒤 해제
-.venv/bin/python -c "import db, reconcile; c=db.open_db(); reconcile.resume_trading(c); c.close()"
+- 사유가 비어 있으면 거부하고 상태를 바꾸지 않습니다.
+- HALT 파일이 있으면 거부합니다. 이 명령은 파일을 지우지 않으니 직접 삭제한 뒤 다시 실행하세요.
+- 중단 상태가 아니면 아무것도 하지 않고 이력도 남기지 않습니다.
+- STATE 중단은 해제하기 전에 DB 포지션을 확인하고 브로커 잔고와 맞추세요.
+
+```bash
+.venv/bin/python -c "import db; c=db.open_db(); print(db.list_positions(c), db.list_positions(c, status='EXTERNAL')); c.close()"
 ```
 
 주문 상태가 `UNKNOWN`(타임아웃 등)으로 남아 있으면 그 종목은 조회로 확정될 때까지
@@ -186,7 +200,7 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 
 ```bash
 .venv/bin/python -m py_compile *.py
-.venv/bin/python -c "import config, state, indicators, kis_overseas, kis_domestic, ai_analyzer, trader, main; print('imports OK')"
+.venv/bin/python -c "import config, db, state, reconcile, risk, notifier, models, strategy, exit_rules, sizing, indicators, history, market_calendar, broker, kis_overseas, kis_domestic, ai_analyzer, trader, main; print('imports OK')"
 ```
 
 ## 모의 ↔ 실전 전환
@@ -246,10 +260,12 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 | 문서 | 내용 |
 |---|---|
 | [README.md](README.md) | 이 문서. 설치·설정·실행의 단일 진입점 |
-| [CLAUDE.md](CLAUDE.md) | 코드 작업 시 지켜야 할 규칙, 모듈 구조, 알려진 문제 |
+| [CLAUDE.md](CLAUDE.md) | 코드 작업 시 지켜야 할 규칙, 모듈 구조, 알려진 제한 |
 | [docs/CHANGES.md](docs/CHANGES.md) | 작업 이력 (append-only) |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 개발 환경, 브랜치/커밋 규칙, 수동 검증 절차 |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 문제 해결 |
+| [docs/manual_checks.md](docs/manual_checks.md) | 모의 서버에서 사람이 직접 확인하는 절차(신 TR_ID·지정가 등) |
+| [docs/kis_api_fields.md](docs/kis_api_fields.md) | KIS API 필드·TR_ID 사실 모음(포털 표 기준. 여기 없는 API는 추측 금지) |
 | [docs/archive/](docs/archive/) | 이전 문서 보관 (내용이 낡음. 참고용으로만) |
 
 코드 구조는 [CLAUDE.md](CLAUDE.md)의 "모듈 구조" 절을 참고하세요.
@@ -262,4 +278,4 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 
 ---
 
-최초 작성 2026-10-13, 최종 갱신 2026-10-18 (T00 문서 정리)
+최초 작성 2026-10-13, 최종 갱신 2026-10-28 (T09a: 중단·재개 절차, 주문 함수 서술)
