@@ -94,6 +94,7 @@ Python 버전: `.python-version` = `3.12.15`
 | `MAX_DRAWDOWN_PCT` | `10.0` | `CAPITAL_CAP_KRW` 기준 고점 대비 하락 한도(%). 0 이하·100 초과면 시작 거부. **T09b-2a: 값 검증만 — 중단을 거는 배선은 T09b-2b** |
 | `DAILY_LOSS_LIMIT_PCT` | `3.0` | `CAPITAL_CAP_KRW` 기준 당일 손실 한도(%). 0 이하·100 초과면 시작 거부. **T09b-2a: 값 검증만 — 배선은 T09b-2b** |
 | `HALT_ACTION` | `hold` | 중단 시 보유 포지션 처리. `hold`만 구현, `liquidate`는 시작 시 거부 (T09b) |
+| `GEMINI_TIMEOUT_SEC` | `30` | Gemini 요청 제한시간(초). 0 초과 300 이하. 응답이 멈춰 매매 사이클이 밀리는 것을 막는다 (T09b) |
 | `DIP_THRESHOLD` | `-1.5` | 지표 폴백 시 평단 대비 매수 하락률(%) |
 | `USE_INDICATORS` | `True` | RSI+볼린저 지표 진입 사용 |
 | `RSI_PERIOD` | `14` | RSI 기간 |

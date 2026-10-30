@@ -322,6 +322,10 @@ DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3.0"))
 # 전량 매도 경로라 시작 시 거부한다.
 HALT_ACTION = os.getenv("HALT_ACTION", "hold").strip().lower()
 
+# Gemini 요청 제한시간(초) (T09b). SDK 기본값을 알 수 없어 직접 건다 — 응답이 멈추면 main.job() 이 그 호출에서
+# 기다리는 동안 손절을 포함한 매매 사이클이 실행되지 않는다. 429/503 재시도가 최대 3회라 최악의 경우 이 값의 약 3배가 걸린다.
+GEMINI_TIMEOUT_SEC = float(os.getenv("GEMINI_TIMEOUT_SEC", "30"))
+
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
 # 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)
 MAX_BUYS_PER_DAY       = int(os.getenv("MAX_BUYS_PER_DAY", "2"))

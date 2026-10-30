@@ -34,9 +34,24 @@ _GEMINI_MODEL = "gemini-3.1-flash-lite"
 _MAX_ATTEMPTS = 3
 _RETRY_SLEEP_SEC = 3.0
 
+
+def _build_client(api_key: str, timeout_sec: float):
+    """
+    Gemini 클라이언트를 만든다. **요청 제한시간을 반드시 건다** (T09b).
+
+    제한시간이 없으면 응답이 멈췄을 때 `main.job()` 이 그 호출에서 영원히 기다리고, 그동안 손절을 포함한
+    매매 사이클이 실행되지 않는다. `http_options.timeout` 의 단위는 밀리초다.
+    (VERIFY: 이 값이 연결·읽기 각각의 제한인지 전체 시간 제한인지는 SDK 문서로 확인하지 못했다.)
+    """
+    timeout = float(timeout_sec)
+    if not (0 < timeout <= 300):
+        raise ValueError(f"GEMINI_TIMEOUT_SEC 는 0 초과 300 이하여야 합니다: {timeout_sec!r}")
+    return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout * 1000)))
+
+
 # 신규 google.genai Client 초기화
 if config.GEMINI_API_KEY:
-    _client = genai.Client(api_key=config.GEMINI_API_KEY)
+    _client = _build_client(config.GEMINI_API_KEY, config.GEMINI_TIMEOUT_SEC)
 else:
     logger.warning("GEMINI_API_KEY not configured - AI analysis will not work")
     _client = None
