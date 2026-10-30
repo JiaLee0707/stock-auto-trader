@@ -177,10 +177,22 @@ def job():
     logger.info(f"   [{mode_label}] 주문 구간 확인 — {summary}")
 
     try:
-        # Step 1: AI 뉴스 분석
-        sentiment = analyze_market_sentiment()
-        ai_score = sentiment["score"]
-        logger.info(f"🤖 AI 시장 분석: {sentiment['reason']} (점수: {ai_score})")
+        # Step 1: AI 뉴스 분석 — 실패해도 매매 사이클(청산 포함)은 실행한다 (T09b).
+        # `analyze_market_sentiment` 는 Gemini 호출만 try 로 감싸고, 시세·뉴스 수집과 프롬프트 구성은 밖에서 한다.
+        # 거기서 예외가 새면 아래 매매 사이클이 통째로 건너뛰어져 손절도 나가지 않는다.
+        # 점수를 모르면 None 으로 넘긴다 — `strategy.decide()` 는 AI 필터가 켜져 있을 때 None 이면
+        # 신규 매수만 보류하고 청산은 그대로 판단한다. (AI 가 내부에서 실패해 0점을 돌려주는 기존 동작은 T10 에서 다룬다.)
+        ai_score = None
+        try:
+            sentiment = analyze_market_sentiment()
+            ai_score = sentiment["score"]
+            logger.info(f"🤖 AI 시장 분석: {sentiment['reason']} (점수: {ai_score})")
+        except Exception as e:
+            ai_score = None   # 일부만 채워졌어도 점수는 신뢰하지 않는다
+            logger.error(
+                f"🤖 AI 분석 단계 실패({type(e).__name__}) — 점수 없이 매매 사이클을 계속합니다"
+                f"(신규 매수만 보류, 청산은 계속): {e}"
+            )
 
         # Step 2: 매매 실행 (개장한 시장만)
         run_trading_cycle(ai_score, overseas_open, domestic_open)

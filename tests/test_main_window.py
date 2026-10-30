@@ -236,3 +236,66 @@ def test_job_passes_market_specific_flags(freeze_now, spy, monkeypatch):
     freeze_now(_at(KST, 2026, 10, 20, 11, 0))
     main.job()
     assert seen == {"overseas": False, "domestic": True}
+
+
+# ── T09b: AI 분석 단계의 예외가 매매 사이클(청산 포함)을 건너뛰게 만들지 않는다 ──
+import logging as _logging_ai
+
+
+def _in_window():
+    """화요일 11:00 KST — 국내 정규장이고 개장·마감 안전 마진 밖."""
+    return _at(KST, 2026, 12, 22, 11, 0)
+
+
+def _capture_cycle(monkeypatch):
+    seen = []
+    monkeypatch.setattr(main, "run_trading_cycle",
+                        lambda score, overseas, domestic: seen.append((score, overseas, domestic)))
+    return seen
+
+
+def test_job_passes_the_ai_score_when_analysis_works(freeze_now, spy, monkeypatch):
+    """대조군 — 이 시각에 매매 사이클이 실제로 불리고 점수가 그대로 넘어간다."""
+    freeze_now(_in_window())
+    seen = _capture_cycle(monkeypatch)
+    monkeypatch.setattr(main, "analyze_market_sentiment", lambda: {"score": 7, "reason": "stub"})
+    main.job()
+    assert len(seen) == 1, "주문 구간 안인데 매매 사이클이 불리지 않았다(시각 가정 확인 필요)"
+    assert seen[0][0] == 7
+    assert seen[0][2], "국내 주문 구간이 아니다(시각 가정 확인 필요)"
+
+
+def test_job_still_runs_the_trading_cycle_when_ai_analysis_raises(freeze_now, spy, monkeypatch, caplog):
+    freeze_now(_in_window())
+    seen = _capture_cycle(monkeypatch)
+
+    def boom():
+        raise RuntimeError("ai module bug (test)")
+
+    monkeypatch.setattr(main, "analyze_market_sentiment", boom)
+    with caplog.at_level(_logging_ai.ERROR):
+        main.job()
+    assert len(seen) == 1, "AI 분석 예외 때문에 매매 사이클(청산 포함)이 건너뛰어졌다"
+    assert seen[0][0] is None
+    assert "AI 분석 단계 실패" in caplog.text
+
+
+@pytest.mark.parametrize("broken", [{"reason": "점수 없음"}, {"score": 5}], ids=["no_score", "no_reason"])
+def test_job_does_not_trust_a_partial_ai_result(freeze_now, spy, monkeypatch, broken):
+    freeze_now(_in_window())
+    seen = _capture_cycle(monkeypatch)
+    monkeypatch.setattr(main, "analyze_market_sentiment", lambda: broken)
+    main.job()
+    assert len(seen) == 1
+    assert seen[0][0] is None, "일부만 채워진 AI 결과의 점수를 그대로 썼다"
+
+
+def test_job_survives_a_failing_trading_cycle(freeze_now, spy, monkeypatch):
+    """매매 사이클의 예외는 job() 안에서 기록되고 밖으로 나가지 않는다(스케줄러 루프 보호)."""
+    freeze_now(_in_window())
+
+    def boom(score, overseas, domestic):
+        raise RuntimeError("cycle failed (test)")
+
+    monkeypatch.setattr(main, "run_trading_cycle", boom)
+    main.job()
