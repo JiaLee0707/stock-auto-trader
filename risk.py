@@ -14,7 +14,9 @@ risk.py — 킬스위치의 게이트 판단과 수동 재개 CLI (T09a).
 """
 import argparse
 import logging
+import math
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import config
@@ -96,6 +98,87 @@ def assert_order_permitted(conn, side: str, reason: str | None = None) -> None:
     if gate == FULL_STOP or (gate == ENTRIES_BLOCKED and side == "BUY"):
         suffix = f" (사유: {reason})" if reason else ""
         raise TradingHalted(f"{side} 주문 차단{suffix} — {detail}")
+
+
+# ── 손실 한도 (T09b) ──────────────────────────────────────
+
+_EPS_KRW = 1e-6     # 부동소수점 오차 허용(원). 한도와 정확히 같으면 걸린 것으로 본다.
+
+DRAWDOWN = "DRAWDOWN"
+DAILY_LOSS = "DAILY_LOSS"
+
+
+@dataclass(frozen=True)
+class LossCheck:
+    """손실 한도 평가 결과. 금액은 원화, 퍼센트는 CAPITAL_CAP_KRW 대비다."""
+
+    equity: float
+    peak: float                 # 이번 값을 반영한 고점(내려가지 않는다). 다음 호출에 넘긴다
+    day_start: float
+    drawdown_krw: float         # 고점 대비 하락액(0 이상)
+    daily_loss_krw: float       # 당일 시작 대비 하락액(0 이상)
+    drawdown_pct: float
+    daily_loss_pct: float
+    drawdown_limit_krw: float
+    daily_limit_krw: float
+    breaches: tuple             # (DRAWDOWN, DAILY_LOSS) 중 해당하는 것
+
+    @property
+    def breached(self) -> bool:
+        return bool(self.breaches)
+
+    def describe(self) -> str:
+        return (
+            f"자산 {self.equity:,.0f}원 | 낙폭 {self.drawdown_krw:,.0f}원 "
+            f"({self.drawdown_pct:.2f}%, 한도 {self.drawdown_limit_krw:,.0f}원) | "
+            f"일일 손실 {self.daily_loss_krw:,.0f}원 "
+            f"({self.daily_loss_pct:.2f}%, 한도 {self.daily_limit_krw:,.0f}원)"
+        )
+
+
+def evaluate_loss_limits(*, equity, peak, day_start, capital_cap_krw,
+                         max_drawdown_pct, daily_loss_limit_pct) -> LossCheck:
+    """
+    고점·당일 시작 대비 손실이 한도에 닿았는지 평가한다. **순수 함수** — I/O·시계·설정을 읽지 않는다.
+
+    기준은 계좌 총자산이 아니라 `capital_cap_krw` 다. 모의계좌 잔고가 수천만 원이면 계좌 기준 %는 영원히 걸리지 않는다.
+    `equity` 는 봇이 쓴 자본 기준 자산(CAPITAL_CAP_KRW + 누적 실현손익 + 미실현손익)이며 계산은 호출부의 일이다.
+    고점은 내려가지 않는다. 한도와 정확히 같으면 걸린 것으로 본다. 입력이 올바르지 않으면 추측하지 않고 ValueError.
+    """
+    cap = float(capital_cap_krw)
+    if not (math.isfinite(cap) and cap > 0):
+        raise ValueError(f"capital_cap_krw 는 양수여야 합니다: {capital_cap_krw!r}")
+    limits = []
+    for name, value in (("max_drawdown_pct", max_drawdown_pct),
+                        ("daily_loss_limit_pct", daily_loss_limit_pct)):
+        v = float(value)
+        if not (math.isfinite(v) and 0 < v <= 100):
+            raise ValueError(f"{name} 는 0 초과 100 이하여야 합니다: {value!r}")
+        limits.append(v)
+    eq, pk, ds = float(equity), float(peak), float(day_start)
+    for name, v in (("equity", eq), ("peak", pk), ("day_start", ds)):
+        if not math.isfinite(v):
+            raise ValueError(f"{name} 가 유한한 숫자가 아닙니다: {v!r}")
+
+    new_peak = max(pk, eq)
+    drawdown_krw = max(0.0, new_peak - eq)
+    daily_loss_krw = max(0.0, ds - eq)
+    dd_limit = cap * limits[0] / 100.0
+    daily_limit = cap * limits[1] / 100.0
+
+    breaches = []
+    if drawdown_krw + _EPS_KRW >= dd_limit:
+        breaches.append(DRAWDOWN)
+    if daily_loss_krw + _EPS_KRW >= daily_limit:
+        breaches.append(DAILY_LOSS)
+    return LossCheck(
+        equity=eq, peak=new_peak, day_start=ds,
+        drawdown_krw=drawdown_krw, daily_loss_krw=daily_loss_krw,
+        drawdown_pct=drawdown_krw / cap * 100.0, daily_loss_pct=daily_loss_krw / cap * 100.0,
+        drawdown_limit_krw=dd_limit, daily_limit_krw=daily_limit,
+        breaches=tuple(breaches),
+    )
+
 
 
 # ── CLI ───────────────────────────────────────────────────

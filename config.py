@@ -132,6 +132,42 @@ def enforce_trading_mode() -> None:
         raise SystemExit(1)
 
 
+def risk_config_error(*, capital_cap_krw, max_drawdown_pct, daily_loss_limit_pct,
+                      halt_action, overseas_enabled) -> str | None:
+    """
+    손실 한도 설정이 안전하게 쓸 수 있는 값인지 확인한다 (T09b). 문제가 있으면 사유 문자열, 없으면 None.
+    순수 함수 — 설정 모듈의 전역값을 읽지 않는다(테스트가 값을 직접 넘긴다).
+    """
+    if not (capital_cap_krw > 0):
+        return ("CAPITAL_CAP_KRW 가 0 이하입니다. 낙폭·일일 손실 한도는 이 값을 기준으로 계산하므로 "
+                "양수여야 합니다(예: 200000). 상한 없이 시작하지 않습니다.")
+    for name, value in (("MAX_DRAWDOWN_PCT", max_drawdown_pct),
+                        ("DAILY_LOSS_LIMIT_PCT", daily_loss_limit_pct)):
+        if not (0 < value <= 100):
+            return f"{name}={value!r} 가 올바르지 않습니다. 0 초과 100 이하여야 합니다(끌 수 없습니다)."
+    if halt_action == "liquidate":
+        return ("HALT_ACTION=liquidate 는 구현되지 않았습니다(모의 서버에서 검증된 적 없는 전량 매도 경로). "
+                "hold 로 두세요.")
+    if halt_action != "hold":
+        return f"HALT_ACTION={halt_action!r} 가 올바르지 않습니다. hold 만 쓸 수 있습니다."
+    if overseas_enabled:
+        return ("IS_OVERSEAS_ENABLED=true 입니다. 해외 손익은 환율을 반영하지 않아 손실 한도를 계산할 수 없고 "
+                "해외 체결조회·취소도 미구현이라 false 로 두세요.")
+    return None
+
+
+def enforce_risk_config() -> None:
+    """손실 한도 설정이 위험하면 로그를 남기고 SystemExit 로 즉시 종료한다 (T09b). 어떤 API 호출보다 먼저 부른다."""
+    error = risk_config_error(
+        capital_cap_krw=CAPITAL_CAP_KRW, max_drawdown_pct=MAX_DRAWDOWN_PCT,
+        daily_loss_limit_pct=DAILY_LOSS_LIMIT_PCT, halt_action=HALT_ACTION,
+        overseas_enabled=IS_OVERSEAS_ENABLED,
+    )
+    if error:
+        logging.getLogger("bot").critical(f"🚨 설정 오류 — 시작을 거부합니다: {error}")
+        raise SystemExit(1)
+
+
 def assert_order_allowed() -> None:
     """
     주문 직전 방어선. 실전 모드인데 확인값이 없으면 예외를 던진다.
@@ -274,6 +310,17 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 # 비상정지 파일 경로(T09a). 비우면 프로젝트 루트의 HALT. 상대경로는 프로젝트 루트 기준(작업 디렉터리와 무관).
 # 이 파일이 있으면 매수·매도 모두 막힌다. 사람이 직접 지워야 풀린다.
 HALT_FILE = os.getenv("HALT_FILE", "").strip()
+
+# ── 손실 한도 (T09b) ────────────────────────────────────
+# 기준 자본은 계좌 총자산이 아니라 CAPITAL_CAP_KRW 다. 모의계좌 잔고가 수천만 원이면 계좌 기준 %는 영원히 걸리지 않는다.
+# 한도에 닿으면 RISK 중단(신규 매수만 차단, 청산은 계속)이 걸리고 사람이 `python -m risk resume` 으로 풀어야 한다.
+# VERIFY: 기본값은 검증 전 가설이다. 20만원·2주 포지션이면 손절 1회가 약 1,400원이라
+# 일일 3%(6,000원)는 5번째 손절, 낙폭 10%(20,000원)는 15번째 손절에서 걸린다. 모의 단계에서는 더 촘촘히 두길 권한다.
+MAX_DRAWDOWN_PCT     = float(os.getenv("MAX_DRAWDOWN_PCT", "10.0"))
+DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3.0"))
+# 중단 시 보유 포지션 처리. "hold"(그대로 둔다)만 구현됐다. "liquidate" 는 모의 서버에서 검증된 적 없는
+# 전량 매도 경로라 시작 시 거부한다.
+HALT_ACTION = os.getenv("HALT_ACTION", "hold").strip().lower()
 
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
 # 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)
