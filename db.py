@@ -76,7 +76,7 @@ KV_PEAK_EQUITY = "peak_equity"
 KV_HALT_KIND = "trading_halted_kind"      # "STATE" | "RISK" (T09a)
 KV_HALT_AT = "trading_halted_at"          # 중단 시작 시각 (T09a)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # 잠금 대기 시간(ms). 잠긴 DB 를 오래 붙잡고 있지 않도록 짧게 잡는다.
 # 이 값이 곧 "잠김을 얼마나 기다린 뒤 실패로 알릴지"이므로 테스트에서 낮춰 검증한다.
@@ -183,6 +183,26 @@ _MIGRATIONS: list[tuple[int, str]] = [
         details_json TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_halt_events_ts ON halt_events(ts);
+    """),
+    (4, """
+    -- T09b: 체결된 매도의 실현손익. append-only. (order_id, cum_filled_qty)가 같으면 한 번만 기록된다.
+    -- pnl 이 NULL 이면 체결가·평단·수량을 알 수 없어 손익을 계산하지 않았다는 뜻이다(note 에 이유).
+    CREATE TABLE IF NOT EXISTS realized_pnl (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts             TEXT NOT NULL,
+        order_id       INTEGER NOT NULL,
+        cum_filled_qty REAL NOT NULL,
+        symbol         TEXT NOT NULL,
+        market         TEXT NOT NULL,
+        currency       TEXT NOT NULL,
+        qty            REAL NOT NULL,
+        sell_price     REAL,
+        avg_cost       REAL,
+        pnl            REAL,
+        note           TEXT,
+        UNIQUE (order_id, cum_filled_qty)
+    );
+    CREATE INDEX IF NOT EXISTS idx_realized_pnl_ts ON realized_pnl(ts);
     """),
 ]
 
@@ -692,5 +712,71 @@ def list_halt_events(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
     """중단·재개 이력, 최신순."""
     rows = conn.execute(
         "SELECT * FROM halt_events ORDER BY id DESC LIMIT ?", (int(limit),)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── realized_pnl (T09b) ───────────────────────────────────
+
+def record_realized_pnl(conn: sqlite3.Connection, *, order_id: int, cum_filled_qty: float,
+                        symbol: str, market: str, qty, sell_price, avg_cost,
+                        at: str | None = None) -> float | None:
+    """
+    체결된 매도 1건의 실현손익을 기록한다. 같은 (order_id, cum_filled_qty) 는 한 번만 남는다(멱등).
+
+    손익 = (매도가 - 평단) × 수량. 수수료·세금은 반영하지 않는 총손익이다(VERIFY: T11 비용 모델).
+    체결가·평단·수량 중 하나라도 유효하지 않으면 **손익을 추측하지 않고 NULL** 로 기록하고 note 를 남긴다.
+    (시장가 주문의 주문가는 0 이라 그대로 곱하면 -100% 손실로 잘못 계산된다.)
+
+    반환: 계산한 손익, 알 수 없으면 None.
+    """
+    note = None
+    pnl = None
+    try:
+        q = float(qty)
+        sp = None if sell_price is None else float(sell_price)
+        ac = None if avg_cost is None else float(avg_cost)
+    except (TypeError, ValueError):
+        q, sp, ac = 0.0, None, None
+    if q <= 0:
+        note = "qty_not_positive"
+    elif sp is None or sp <= 0:
+        note = "sell_price_unknown"
+    elif ac is None or ac <= 0:
+        note = "avg_cost_unknown"
+    else:
+        pnl = (sp - ac) * q
+    currency = "KRW" if str(market) == "domestic" else "USD"
+    with transaction(conn):
+        conn.execute(
+            "INSERT OR IGNORE INTO realized_pnl "
+            "(ts, order_id, cum_filled_qty, symbol, market, currency, qty, sell_price, avg_cost, pnl, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (at or now_iso(), int(order_id), float(cum_filled_qty), str(symbol), str(market),
+             currency, q, sp, ac, pnl, note),
+        )
+    return pnl
+
+
+def sum_realized_pnl(conn: sqlite3.Connection, *, currency: str = "KRW") -> float:
+    """누적 실현손익 합계(해당 통화). 알 수 없는(NULL) 건은 합에 들어가지 않는다."""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(pnl), 0) AS s FROM realized_pnl WHERE currency = ?", (currency,)
+    ).fetchone()
+    return float(row["s"])
+
+
+def count_unknown_pnl(conn: sqlite3.Connection, *, currency: str = "KRW") -> int:
+    """손익을 계산하지 못한(NULL) 매도 체결 수. 0 이 아니면 손실 한도 계산이 실제보다 낙관적일 수 있다."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM realized_pnl WHERE currency = ? AND pnl IS NULL", (currency,)
+    ).fetchone()
+    return int(row["n"])
+
+
+def list_realized_pnl(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
+    """실현손익 기록, 최신순."""
+    rows = conn.execute(
+        "SELECT * FROM realized_pnl ORDER BY id DESC LIMIT ?", (int(limit),)
     ).fetchall()
     return [dict(r) for r in rows]

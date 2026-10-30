@@ -55,7 +55,7 @@
 ## 모듈 구조 (T09a 시점으로 갱신)
 ```
 config.py         설정(env 엄격 파싱), assert_order_allowed()·live_guard_error(), mask(). 옛 설정명 경고
-db.py             sqlite3 상태 저장소(positions·orders·equity_log·kv·halt_events). 마이그레이션 현재 v3
+db.py             sqlite3 상태 저장소(positions·orders·equity_log·kv·halt_events·realized_pnl). 마이그레이션 현재 v4
 state.py          DB 기반 상태(당일 매수 횟수·시각), 지연 프록시 bot_state
 reconcile.py      브로커↔DB 대조, 중단 플래그(halt_trading(kind=STATE|RISK)·resume_trading·halt_events 이력)
 risk.py           킬스위치 게이트(cycle_gate·assert_order_permitted·TradingHalted), HALT 파일, 재개 CLI(python -m risk)

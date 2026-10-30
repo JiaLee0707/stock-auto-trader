@@ -42,13 +42,13 @@ def _tables(conn):
 
 # ── 마이그레이션 ──────────────────────────────────────────
 
-def test_new_db_is_schema_v3_with_halt_events(conn):
-    assert db.SCHEMA_VERSION == db._MIGRATIONS[-1][0] == 3
-    assert _version(conn) == 3
+def test_new_db_has_halt_events_at_latest_schema(conn):
+    assert db.SCHEMA_VERSION == db._MIGRATIONS[-1][0]
+    assert _version(conn) == db.SCHEMA_VERSION
     assert "halt_events" in _tables(conn)
 
 
-def test_v2_db_upgrades_to_v3_and_keeps_data(tmp_path):
+def test_v2_db_upgrades_to_latest_and_keeps_data(tmp_path):
     path = tmp_path / "bot.db"
     c = db.open_db(path)
     db.upsert_position(c, "379800", "domestic", qty=3.0, avg_price=100.0, status="OPEN")
@@ -60,7 +60,7 @@ def test_v2_db_upgrades_to_v3_and_keeps_data(tmp_path):
 
     c = db.open_db(path)
     try:
-        assert _version(c) == 3
+        assert _version(c) == db.SCHEMA_VERSION
         assert "halt_events" in _tables(c)
         assert db.get_position(c, "379800", "domestic")["qty"] == 3.0
     finally:

@@ -501,6 +501,25 @@ def _settle_order(conn, order: dict, status_fn, cancel_fn=None) -> "db.OrderStat
 
     if delta > 0:
         prev = db.get_position(conn, symbol, market)
+        if side == "SELL":
+            # 실현손익 기록(T09b) — **포지션 반영보다 먼저** 한다. 기록은 (주문, 누적 체결 수량)이 같으면
+            # 한 번만 남으므로 다시 처리돼도 두 번 세지 않는다. 기록에 실패하면 포지션을 바꾸기 전에
+            # 예외로 끝나(다음 사이클에 다시 시도) 손실이 집계에서 빠진 채 포지션만 줄어드는 일이 없다.
+            # 수수료·세금은 반영하지 않은 총손익이다. 부분 체결은 누적 평균가를 증분에 적용한 근사다(VERIFY).
+            pnl = db.record_realized_pnl(
+                conn, order_id=order["id"], cum_filled_qty=float(st.filled_qty),
+                symbol=symbol, market=market,
+                qty=min(delta, float((prev or {}).get("qty") or 0.0)),
+                sell_price=st.avg_fill_price if st.avg_fill_price is not None else order.get("price"),
+                avg_cost=float((prev or {}).get("avg_price") or 0.0),
+            )
+            if pnl is None:
+                logger.warning(
+                    f"[손익] 주문 #{order['id']} 실현손익을 계산하지 못했습니다(체결가·평단 확인 필요) — "
+                    "손실 한도 계산에서 빠집니다"
+                )
+            else:
+                logger.info(f"[손익] 주문 #{order['id']} {market} {symbol} 실현손익 {pnl:+,.2f}")
         _apply_fill_to_position(
             conn, market=market, ticker=symbol, side=side, qty=delta,
             price=st.avg_fill_price if st.avg_fill_price is not None else order.get("price"),
