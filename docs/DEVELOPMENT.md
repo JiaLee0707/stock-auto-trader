@@ -21,6 +21,8 @@
 
 테스트는 `tests/` 에 있습니다. 개발 전용 의존성은 `requirements-dev.txt` 에 있습니다.
 
+설치: `.venv/bin/python -m pip install --pre -r requirements-dev.txt` (pandas-ta 가 pre-release 라서 `--pre` 가 필요합니다)
+
 `tests/conftest.py` 가 모든 테스트에서 DB 경로, 일봉 캐시 경로, 텔레그램 설정, HALT 파일 경로를 임시 위치로 돌려, 테스트가 실제 `data/bot.db`·`data/bars`·텔레그램·프로젝트 루트의 `HALT` 에 닿지 않게 합니다.
 
 아래 "수동 검증 절차"는 환경 점검용이며 테스트 통과를 대신하지 않습니다.
@@ -63,7 +65,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
 
 ## 작업 종료 시
 
-`docs/CHANGES.md`에 **덮어쓰지 말고 추가**합니다. 형식은 CLAUDE.md의 "작업 방식" 참고 (6개 항목).
+사용자가 요청하면 `docs/CHANGES.md`에 **덮어쓰지 말고 추가**합니다. 형식은 CLAUDE.md의 "작업 방식" 참고 (6개 항목).
 
 ## 작업 규칙 요약
 
@@ -79,20 +81,9 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
 
 ## 코드 작성 시 참고
 
-- 모듈 구조와 알려진 문제는 [CLAUDE.md](../CLAUDE.md) 참고
+- 모듈 구조와 알려진 제한은 [CLAUDE.md](../CLAUDE.md) 참고
 - 기존 공개 함수 시그니처는 가능하면 유지. 바꾸면 `docs/CHANGES.md`에 명시
 - 범위 밖 대규모 리팩터링 금지. 새 의존성은 이유를 작업 보고에 기재
-
-## 미사용 모듈 (삭제 여부는 사용자 결정)
-
-아래 두 파일은 **실행 경로에서 import되지 않습니다** (2026-10-18 확인). 삭제하지 않고 남겨둡니다.
-
-| 파일 | 내용 | 상태 |
-|---|---|---|
-| `trading_strategy.py` | TradingTarget, AssetManager, PositionSizer, PortfolioAnalyzer, SignalGenerator | 어디에서도 import 안 됨 |
-| `utils.py` | TradingLogger, DataValidator, MathUtils, TimeUtils, ConfigManager | 어디에서도 import 안 됨 |
-
-`utils.py`는 `config.py`의 낡은 설정명(`BUY_RATIO` 기본값 `0.30`, `TAKE_PROFIT_THRESHOLD`)을 자체적으로 재정의하고 있어, 그대로 두면 실제 설정과 어긋난 값을 참조할 위험이 있습니다.
 
 ## 문서 소스
 
