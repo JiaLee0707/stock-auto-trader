@@ -13,11 +13,14 @@ risk.py — 킬스위치의 게이트 판단과 수동 재개 CLI (T09a).
     python -m risk resume --reason "무엇을 확인하고 해제하는지"
 """
 import argparse
+import json
 import logging
 import math
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import config
 import db
@@ -180,6 +183,198 @@ def evaluate_loss_limits(*, equity, peak, day_start, capital_cap_krw,
     )
 
 
+# ── 손실 한도 평가·기록 (T09b) ─────────────────────────────
+
+KV_LOSS_BASELINE = "loss_baseline"      # JSON 한 키: peak, day, day_start, last_equity, unknown_ack (한 번에 써서 반쯤 쓰인 상태를 막는다)
+KV_LOSS_RESET = "loss_reset_pending"    # "1" 이면 다음 평가에서 기준선을 현재 값으로 다시 잡는다(손실 한도 중단을 재개한 직후)
+KV_LOSS_HALT = "loss_halt_active"       # "1" 이면 현재 중단이 손실 한도 때문이다 — 재개할 때 기준선 재설정 대상
+
+PNL_UNKNOWN = "PNL_UNKNOWN"             # 손익을 계산하지 못한 매도 체결이 확인된 수보다 늘었다
+BASELINE_CORRUPT = "BASELINE_CORRUPT"   # 저장된 기준선을 읽을 수 없다
+
+_REASON_LABEL = {
+    DRAWDOWN: "고점 대비 낙폭 한도",
+    DAILY_LOSS: "일일 손실 한도",
+    PNL_UNKNOWN: "손익을 계산하지 못한 매도 체결",
+    BASELINE_CORRUPT: "손실 기준선 손상",
+}
+_KST = ZoneInfo("Asia/Seoul")
+
+
+class EquityUnavailable(Exception):
+    """봇 자산을 계산할 수 없다(시세를 모르는 보유 등). 호출부는 신규 매수만 보류하고 청산은 계속한다."""
+
+
+def compute_bot_equity(*, capital_cap_krw, realized_pnl_krw, open_positions, prices) -> float:
+    """
+    봇이 쓴 자본 기준 자산 = CAPITAL_CAP_KRW + 누적 실현손익 + DB 의 OPEN 보유 미실현손익. **순수 함수**.
+
+    브로커 잔고가 아니라 DB 행(`open_positions`, status=OPEN 만 넘긴다)으로 계산한다 — 잔고 수량에는 봇이 만들지 않은
+    EXTERNAL 보유가 섞인다. 수수료·세금은 반영하지 않는다(VERIFY: T11 비용 모델).
+    평가할 수 없는 보유(시세·평단을 모름, 해외 보유)가 있으면 추측하지 않고 EquityUnavailable.
+    `prices` 는 {(symbol, market): 현재가(원)}.
+    """
+    equity = float(capital_cap_krw) + float(realized_pnl_krw)
+    for pos in open_positions:
+        qty = float(pos.get("qty") or 0.0)
+        if qty <= 0:
+            continue
+        symbol, market = str(pos.get("symbol")), str(pos.get("market"))
+        if market != "domestic":
+            raise EquityUnavailable(f"{market} {symbol} 보유는 원화로 평가할 수 없습니다")
+        price = prices.get((symbol, market))
+        if price is None or not math.isfinite(float(price)) or float(price) <= 0:
+            raise EquityUnavailable(f"{market} {symbol} 시세를 몰라 평가할 수 없습니다")
+        avg = float(pos.get("avg_price") or 0.0)
+        if not (math.isfinite(avg) and avg > 0):
+            raise EquityUnavailable(f"{market} {symbol} 평단을 몰라 평가할 수 없습니다")
+        equity += (float(price) - avg) * qty
+    return equity
+
+
+def _parse_baseline(raw: str) -> dict:
+    """저장된 기준선(JSON)을 읽는다. 읽을 수 없으면 ValueError — 추측해서 채우지 않는다."""
+    try:
+        data = json.loads(raw)
+        parsed = {
+            "peak": float(data["peak"]),
+            "day": str(data["day"]),
+            "day_start": float(data["day_start"]),
+            "last_equity": float(data["last_equity"]),
+            "unknown_ack": int(data["unknown_ack"]),
+        }
+        date.fromisoformat(parsed["day"])
+    except (ValueError, TypeError, KeyError) as e:
+        raise ValueError(f"손실 기준선을 읽을 수 없습니다({type(e).__name__})") from e
+    for key in ("peak", "day_start", "last_equity"):
+        if not math.isfinite(parsed[key]):
+            raise ValueError(f"손실 기준선 값이 유한하지 않습니다({key})")
+    return parsed
+
+
+@dataclass(frozen=True)
+class LimitOutcome:
+    """한 번의 평가 결과. check 가 None 이면 기준선이 손상돼 평가하지 못했다."""
+
+    check: "LossCheck | None"
+    reasons: tuple          # DRAWDOWN / DAILY_LOSS / PNL_UNKNOWN / BASELINE_CORRUPT 중 해당하는 것
+    halted_now: bool        # 이번 평가가 새로 RISK 중단을 걸었는가
+    rebaselined: bool       # 재개 직후라 기준선을 다시 잡았는가
+
+
+def _halt_for_loss(conn, text: str, details: dict) -> bool:
+    """RISK 중단을 건다(신규 매수만 차단·청산 계속). 새로 걸렸을 때만 '손실 한도 중단' 표시를 남긴다."""
+    changed = reconcile.halt_trading(conn, f"[손실 한도] {text}", "RISK", details=details)
+    if changed:
+        db.set_kv(conn, KV_LOSS_HALT, "1")
+    return changed
+
+
+def evaluate_and_enforce(conn, *, equity, unknown_pnl_count, now, mode, capital_cap_krw,
+                         max_drawdown_pct, daily_loss_limit_pct) -> LimitOutcome:
+    """
+    봇 자산으로 손실 한도를 평가하고, 기준선·자산 기록을 남기고, 한도에 닿으면 RISK 중단을 건다.
+
+    기준선(kv 한 키)
+      - 고점: 내려가지 않는다. 기준선이 없으면 CAPITAL_CAP_KRW 에서 시작한다.
+        (VERIFY: DB 가 사라지면 고점이 낮아져 낙폭이 줄어 보인다.)
+      - 당일 시작 자산: 그날 첫 평가 때 **전일 마지막 평가 자산**으로 정한다. 첫 사이클 값을 쓰면 시가 갭하락이
+        일일 손실에서 빠진다. 기록이 없으면 현재 값에서 시작한다. 날짜는 KST.
+      - 손익 미확인 매도 건수: 확인된 수(unknown_ack)보다 늘면 한도 계산이 낙관적일 수 있어 중단한다.
+    재개(손실 한도 중단 뒤): CLI 가 재설정 표시를 남기고, 다음 평가가 고점·당일 시작을 현재 값으로 다시 잡고
+    미확인 건수를 확인 처리한다. 그대로 두면 다음 평가에서 같은 한도에 바로 걸려 다시 멈춘다.
+    기준선이 손상됐으면 새로 만들지 않고 RISK 중단을 건다(사람이 재개하면 새로 만든다).
+
+    순서: 검증 → 평가 → 자산 기록·기준선 저장 → 중단. 중단이 실패해도 기준선은 이미 저장돼 있어 다음 평가가 다시 감지한다.
+    중단 기록이 실패하면 예외를 그대로 올린다(호출부가 신규 매수를 보류한다).
+    """
+    if now.tzinfo is None:
+        raise ValueError("now 는 tz-aware 여야 합니다")
+    equity = float(equity)
+    if not math.isfinite(equity):
+        raise ValueError(f"equity 가 유한한 숫자가 아닙니다: {equity!r}")
+    unknown = int(unknown_pnl_count)
+    today = now.astimezone(_KST).date().isoformat()
+
+    reset = db.get_kv(conn, KV_LOSS_RESET) == "1"
+    raw = db.get_kv(conn, KV_LOSS_BASELINE)
+    base = None
+    if raw is not None and not reset:
+        try:
+            base = _parse_baseline(raw)
+        except ValueError as e:
+            logger.critical(f"🚨 [손실 한도] {e} — 신규 매수를 중단합니다. 원인을 확인한 뒤 "
+                            "python -m risk resume --reason ... 로 기준선을 다시 만드세요")
+            changed = _halt_for_loss(conn, str(e), {"reasons": [BASELINE_CORRUPT]})
+            return LimitOutcome(None, (BASELINE_CORRUPT,), changed, False)
+
+    rebaselined = False
+    if reset:
+        peak, day_start, ack = equity, equity, unknown
+        rebaselined = True
+        logger.warning(f"[손실 한도] 재개 후 첫 평가 — 기준선을 현재 자산 {equity:,.0f}원으로 다시 잡습니다 "
+                       f"(고점·당일 시작 재설정, 손익 미확인 {unknown}건 확인 처리)")
+    elif base is None:
+        peak, day_start, ack = float(capital_cap_krw), equity, 0
+        logger.info(f"[손실 한도] 기준선이 없어 새로 시작합니다 (고점 {float(capital_cap_krw):,.0f}원, "
+                    f"당일 시작 {equity:,.0f}원)")
+    else:
+        peak = base["peak"]
+        day_start = base["day_start"] if base["day"] == today else base["last_equity"]
+        ack = base["unknown_ack"]
+
+    check = evaluate_loss_limits(
+        equity=equity, peak=peak, day_start=day_start, capital_cap_krw=capital_cap_krw,
+        max_drawdown_pct=max_drawdown_pct, daily_loss_limit_pct=daily_loss_limit_pct,
+    )
+    reasons = list(check.breaches)
+    if unknown > ack:
+        reasons.append(PNL_UNKNOWN)
+
+    db.log_equity(conn, equity, None, mode)
+    db.set_kv(conn, KV_LOSS_BASELINE, json.dumps({
+        "peak": check.peak,
+        "day": today,
+        "day_start": day_start,
+        "last_equity": equity,
+        "unknown_ack": ack,
+    }, sort_keys=True, allow_nan=False))
+    if reset:
+        db.set_kv(conn, KV_LOSS_RESET, "0")
+
+    halted = False
+    if reasons:
+        names = ", ".join(_REASON_LABEL[r] for r in reasons)
+        text = f"{names} — {check.describe()}"
+        if PNL_UNKNOWN in reasons:
+            text += f" | 손익 미확인 매도 {unknown}건(확인 완료 {ack}건)"
+        halted = _halt_for_loss(conn, text, {
+            "reasons": reasons, "equity": equity, "peak": check.peak, "day_start": day_start,
+            "unknown_pnl": unknown, "unknown_ack": ack,
+        })
+    return LimitOutcome(check, tuple(reasons), halted, rebaselined)
+
+
+def _loss_baseline_lines(conn) -> list:
+    """`python -m risk status` 에 보여 줄 손실 기준선 요약. 읽기 실패도 화면에 그대로 알린다."""
+    lines = []
+    try:
+        raw = db.get_kv(conn, KV_LOSS_BASELINE)
+        pending = db.get_kv(conn, KV_LOSS_RESET) == "1"
+        if raw is None:
+            lines.append("손실 기준선: 아직 없음 (첫 평가 때 만들어집니다)")
+        else:
+            b = _parse_baseline(raw)
+            lines.append(
+                f"손실 기준선: 고점 {b['peak']:,.0f}원 | 당일 시작 {b['day_start']:,.0f}원 ({b['day']}) | "
+                f"마지막 자산 {b['last_equity']:,.0f}원 | 손익 미확인 확인 완료 {b['unknown_ack']}건"
+            )
+        if pending:
+            lines.append("  재개 직후입니다 — 다음 평가에서 기준선을 현재 값으로 다시 잡습니다")
+    except Exception as e:
+        lines.append(f"손실 기준선: 읽기 실패({type(e).__name__}) — 재개(resume)하면 새로 만들어집니다")
+    return lines
+
 
 # ── CLI ───────────────────────────────────────────────────
 
@@ -211,8 +406,16 @@ def _resume(conn, reason: str) -> int:
         print("중단 상태가 아닙니다. 할 일이 없습니다. (이력 없음)")
         return 0
     kind = reconcile.halt_kind(conn)
+    was_loss = db.get_kv(conn, KV_LOSS_HALT) == "1"
     reconcile.resume_trading(conn, text, actor="cli")
     print(f"해제했습니다 (종류 {kind}). 다음 사이클부터 반영됩니다. 사유: {text}")
+    if was_loss:
+        # 손실 한도 때문에 멈췄다면 기준선을 현재 값으로 다시 잡아야 한다. 그대로 두면 다음 평가에서
+        # 같은 한도에 바로 걸려 다시 멈춘다. 해제 다음에 표시한다 — 중간에 실패하면 다시 멈추는 안전한 쪽이다.
+        db.set_kv(conn, KV_LOSS_RESET, "1")
+        db.set_kv(conn, KV_LOSS_HALT, "0")
+        print("손실 한도 기준선(고점·당일 시작 자산·손익 미확인 건수)은 다음 평가에서 현재 값으로 다시 잡힙니다. "
+              "이 시점부터 한도만큼 다시 잃을 수 있습니다.")
     return 0
 
 
@@ -233,6 +436,8 @@ def _status(conn) -> int:
     else:
         print("DB 중단: 아니오")
     print(f"HALT 파일: {_file_state()} ({halt_file_path()})")
+    for line in _loss_baseline_lines(conn):
+        print(line)
     events = db.list_halt_events(conn, limit=5)
     if events:
         print("최근 이력(최신순):")
