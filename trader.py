@@ -64,6 +64,9 @@ logger = logging.getLogger("bot")
 MARKET_OVERSEAS = "overseas"
 MARKET_DOMESTIC = "domestic"
 
+# `_run_cycle` 이 손실 한도를 평가하지 못했을 때(`loss_guard` 실패) 신규 매수를 보류하는 사유 (T09b-2b-2).
+LOSS_GUARD_UNAVAILABLE_REASON = "손실 한도를 평가하지 못해 신규 매수를 보류합니다"
+
 
 def _state_conn():
     """상태 DB 연결. 실패는 삼키지 않고 올린다(호출부가 사이클을 건너뛴다)."""
@@ -969,7 +972,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
                submit_buy=None, submit_sell=None, status_fn=None, cancel_fn=None,
                refresh_balance=None, refresh_peak=None, now: datetime | None = None,
                sizing_fn=None, fx_rate: float = 1.0, params: dict | None = None,
-               broker=None):
+               broker=None, loss_guard=None):
     """
     해외·국내 공통 매매 사이클 — **얇은 오케스트레이터** (T08).
 
@@ -1002,6 +1005,9 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
                 여기서 채워 넣는다(호출부가 넘긴 값이 우선).
         broker: `broker.Broker` 어댑터. 현재는 로그·검증용으로만 받는다 —
                 실제 호출은 기존 `kis_*` 함수가 그대로 한다(요청 지침: 별칭 정리는 범위 밖).
+        loss_guard: (now) -> risk.LimitOutcome. 손실 한도를 평가하고 한도에 닿으면 RISK 중단을 건다 (T09b-2b-2).
+                `_resolve_open_orders` 뒤·판단 앞에서 한 번 부른다. 예외가 나면 이번 사이클 신규 매수만
+                보류하고 청산은 계속한다. None 이면 평가하지 않는다(해외 사이클·예전 경로).
 
     반환: 없음. 결정과 입력 지표값은 로그에 남는다(재현용).
     """
@@ -1040,6 +1046,30 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         except Exception as e:
             logger.error(f"⛔ [{prefix}] 미확정 주문 조회 실패 — 이번 사이클 판단(청산 포함)을 건너뜁니다: {e}")
             return
+
+    # ── 손실 한도 평가 (T09b-2b-2) ────────────────────────
+    # 판단 **전에**, 방금 확정된 체결 손익이 반영된 DB 로 평가한다. 한도에 닿으면 RISK 중단이 걸리고,
+    # 아래 `_entries_blocked_reason` 이 그 상태를 읽어 **이 사이클의 신규 매수**를 막는다. 청산은 계속된다.
+    # 평가 자체가 실패해도(시세·평단을 모르는 보유, DB 오류 등) 추측하지 않는다 — 청산은 그대로 두고
+    # 매수만 보류한다. 여기서 `return` 하면 손절까지 막힌다(T04·T08b 와 같은 원칙).
+    loss_guard_failed = False
+    if loss_guard is not None and market:
+        try:
+            outcome = loss_guard(now)
+            if outcome is not None and outcome.halted_now:
+                logger.critical(
+                    f"🚨 [{prefix}] 손실 한도 중단이 새로 걸렸습니다(신규 매수 중단, 청산은 계속) | "
+                    f"사유: {', '.join(outcome.reasons)}"
+                )
+        except risk.EquityUnavailable as e:
+            # 이 예외의 메시지는 우리 코드가 만든 것(시장·종목만 담는다)이라 그대로 남긴다.
+            loss_guard_failed = True
+            logger.critical(f"🚨 [{prefix}] 봇 자산을 계산하지 못해 손실 한도를 평가하지 못했습니다 — "
+                            f"이번 사이클 신규 매수만 보류합니다(청산은 계속): {e}")
+        except Exception as e:
+            loss_guard_failed = True
+            logger.critical(f"🚨 [{prefix}] 손실 한도 평가 중 오류({type(e).__name__}) — "
+                            "이번 사이클 신규 매수만 보류합니다(청산은 계속)")
 
     # ── 데이터 수집: 확정 일봉 (T08 요구사항 3) ───────────
     # 지표는 **확정 봉만** 쓴다. `bars_received=False` 는 "조회에 실패했다"는 뜻이고,
@@ -1096,12 +1126,17 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
     if qty > 0 and avg_price > 0:
         exit_price = float(avg_price) * (1.0 + float(profit_rate) / 100.0)
 
+    # 킬스위치(중단 상태)가 있으면 그 사유가 우선이다. 중단은 없는데 손실 한도를 평가하지 못했으면 매수만 보류한다.
+    entries_blocked_reason = _entries_blocked_reason(prefix, market)
+    if entries_blocked_reason is None and loss_guard_failed:
+        entries_blocked_reason = LOSS_GUARD_UNAVAILABLE_REASON
+
     cycle_params = strategy.merge_params({
         **(params or {}),
         "market": market,
         "fx_rate": fx_rate,
         "exit_price": exit_price,
-        "entries_blocked_reason": _entries_blocked_reason(prefix, market),
+        "entries_blocked_reason": entries_blocked_reason,
         # 조회 실패(`False`)와 캐시 없음(빈 DataFrame)을 `strategy` 가 구분할 수 있게 알린다.
         "bars_received": bars_received,
         "bars_unavailable_detail": (
@@ -1465,6 +1500,38 @@ def run_overseas_cycle(ai_score: int):
     )
 
 
+def _make_loss_guard(conn, *, ticker: str, market: str, current_price: float):
+    """
+    `_run_cycle` 에 넘길 손실 한도 평가 콜러블을 만든다 (T09b-2b-2). `guard(now)` 는 `risk.LimitOutcome` 을 돌려준다.
+
+    봇 자산 = CAPITAL_CAP_KRW + 누적 실현손익 + DB OPEN 보유의 미실현손익 (`risk.compute_bot_equity`).
+    브로커 잔고가 아니라 DB 행으로 계산하므로 봇이 만들지 않은 EXTERNAL 보유는 들어가지 않는다.
+    평가할 수 없으면(시세·평단을 모르는 보유 등) `risk.EquityUnavailable` 을 그대로 올린다 — 추측하지 않는다.
+    호출부(`_run_cycle`)가 그 사이클의 신규 매수만 보류하고 청산은 계속한다.
+    """
+
+    def guard(now):
+        positions = db.list_positions(conn, status="OPEN")
+        equity = risk.compute_bot_equity(
+            capital_cap_krw=config.CAPITAL_CAP_KRW,
+            realized_pnl_krw=db.sum_realized_pnl(conn),
+            open_positions=positions,
+            prices={(ticker, market): current_price},
+        )
+        return risk.evaluate_and_enforce(
+            conn,
+            equity=equity,
+            unknown_pnl_count=db.count_unknown_pnl(conn),
+            now=now,
+            mode="MOCK" if config.IS_MOCK else "LIVE",
+            capital_cap_krw=config.CAPITAL_CAP_KRW,
+            max_drawdown_pct=config.MAX_DRAWDOWN_PCT,
+            daily_loss_limit_pct=config.DAILY_LOSS_LIMIT_PCT,
+        )
+
+    return guard
+
+
 def run_domestic_cycle(ai_score: int):
     """국내주식 ETF 매매 사이클 (지정가 주문, T04: 체결 확인 기반)."""
     ticker = config.DOMESTIC_TICKER
@@ -1539,4 +1606,6 @@ def run_domestic_cycle(ai_score: int):
         # 기본 0 이므로 고정 `STOP_LOSS_PCT` 가 쓰인다.
         # VERIFY: 일봉 OHLC 를 확보하면 ATR 기반 손절폭을 넘겨야 한다(T06 보고 참고).
         broker=broker_module.for_market(MARKET_DOMESTIC, ticker),
+        # 손실 한도 평가 (T09b-2b-2). 해외 사이클은 넘기지 않는다 — 해외는 꺼져 있고 원화로 평가할 수 없다.
+        loss_guard=_make_loss_guard(conn, ticker=ticker, market=MARKET_DOMESTIC, current_price=current_price),
     )
