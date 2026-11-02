@@ -264,7 +264,7 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 | 문서 | 내용 |
 |---|---|
 | [README.md](README.md) | 이 문서. 설치·설정·실행의 단일 진입점 |
-| [CLAUDE.md](CLAUDE.md) | 코드 작업 시 지켜야 할 규칙, 모듈 구조, 알려진 제한 |
+| [AGENTS.md](AGENTS.md) | 코드 작업 시 지켜야 할 규칙, 모듈 구조, 알려진 제한 (에이전트 지침의 정본. `CLAUDE.md` 는 이를 불러오는 한 줄 파일) |
 | [docs/CHANGES.md](docs/CHANGES.md) | 작업 이력 (append-only) |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 개발 환경, 브랜치/커밋 규칙, 수동 검증 절차 |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 문제 해결 |
@@ -272,7 +272,7 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 | [docs/kis_api_fields.md](docs/kis_api_fields.md) | KIS API 필드·TR_ID 사실 모음(포털 표 기준. 여기 없는 API는 추측 금지) |
 | [docs/archive/](docs/archive/) | 이전 문서 보관 (내용이 낡음. 참고용으로만) |
 
-코드 구조는 [CLAUDE.md](CLAUDE.md)의 "모듈 구조" 절을 참고하세요.
+코드 구조는 [AGENTS.md](AGENTS.md)의 "모듈 구조" 절을 참고하세요.
 
 ## 참고 링크
 

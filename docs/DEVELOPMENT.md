@@ -65,11 +65,11 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
 
 ## 작업 종료 시
 
-사용자가 요청하면 `docs/CHANGES.md`에 **덮어쓰지 말고 추가**합니다. 형식은 CLAUDE.md의 "작업 방식" 참고 (6개 항목).
+사용자가 요청하면 `docs/CHANGES.md`에 **덮어쓰지 말고 추가**합니다. 형식은 AGENTS.md의 "작업 방식" 참고 (6개 항목).
 
 ## 작업 규칙 요약
 
-전체 규칙은 [CLAUDE.md](../CLAUDE.md)에 있습니다. 개발 시 특히 중요한 것:
+전체 규칙은 [AGENTS.md](../AGENTS.md)에 있습니다. 개발 시 특히 중요한 것:
 
 1. 실전 주문이 나갈 수 있는 코드를 실행하지 않는다 (개발·테스트는 모의투자)
 2. `.env`, API 키, 토큰, 계좌번호를 출력·로그·커밋하지 않는다
@@ -81,7 +81,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
 
 ## 코드 작성 시 참고
 
-- 모듈 구조와 알려진 제한은 [CLAUDE.md](../CLAUDE.md) 참고
+- 모듈 구조와 알려진 제한은 [AGENTS.md](../AGENTS.md) 참고
 - 기존 공개 함수 시그니처는 가능하면 유지. 바꾸면 `docs/CHANGES.md`에 명시
 - 범위 밖 대규모 리팩터링 금지. 새 의존성은 이유를 작업 보고에 기재
 
