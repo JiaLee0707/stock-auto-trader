@@ -133,7 +133,8 @@ def enforce_trading_mode() -> None:
 
 
 def risk_config_error(*, capital_cap_krw, max_drawdown_pct, daily_loss_limit_pct,
-                      halt_action, overseas_enabled) -> str | None:
+                      halt_action, overseas_enabled,
+                      max_consecutive_errors=None, unknown_timeout_minutes=None) -> str | None:
     """
     손실 한도 설정이 안전하게 쓸 수 있는 값인지 확인한다 (T09b). 문제가 있으면 사유 문자열, 없으면 None.
     순수 함수 — 설정 모듈의 전역값을 읽지 않는다(테스트가 값을 직접 넘긴다).
@@ -153,6 +154,14 @@ def risk_config_error(*, capital_cap_krw, max_drawdown_pct, daily_loss_limit_pct
     if overseas_enabled:
         return ("IS_OVERSEAS_ENABLED=true 입니다. 해외 손익은 환율을 반영하지 않아 손실 한도를 계산할 수 없고 "
                 "해외 체결조회·취소도 미구현이라 false 로 두세요.")
+    if max_consecutive_errors is not None and not (
+            isinstance(max_consecutive_errors, int) and max_consecutive_errors >= 1):
+        return (f"MAX_CONSECUTIVE_ERRORS={max_consecutive_errors!r} 가 올바르지 않습니다. "
+                "1 이상의 정수여야 합니다(끌 수 없습니다).")
+    if unknown_timeout_minutes is not None and not (
+            0 < float(unknown_timeout_minutes) < float("inf")):
+        return (f"UNKNOWN_TIMEOUT_MINUTES={unknown_timeout_minutes!r} 가 올바르지 않습니다. "
+                "0 보다 큰 유한한 숫자여야 합니다(분).")
     return None
 
 
@@ -162,6 +171,8 @@ def enforce_risk_config() -> None:
         capital_cap_krw=CAPITAL_CAP_KRW, max_drawdown_pct=MAX_DRAWDOWN_PCT,
         daily_loss_limit_pct=DAILY_LOSS_LIMIT_PCT, halt_action=HALT_ACTION,
         overseas_enabled=IS_OVERSEAS_ENABLED,
+        max_consecutive_errors=MAX_CONSECUTIVE_ERRORS,
+        unknown_timeout_minutes=UNKNOWN_TIMEOUT_MINUTES,
     )
     if error:
         logging.getLogger("bot").critical(f"🚨 설정 오류 — 시작을 거부합니다: {error}")
@@ -325,6 +336,15 @@ HALT_ACTION = os.getenv("HALT_ACTION", "hold").strip().lower()
 # Gemini 요청 제한시간(초) (T09b). SDK 기본값을 알 수 없어 직접 건다 — 응답이 멈추면 main.job() 이 그 호출에서
 # 기다리는 동안 손절을 포함한 매매 사이클이 실행되지 않는다. 429/503 재시도가 최대 3회라 최악의 경우 이 값의 약 3배가 걸린다.
 GEMINI_TIMEOUT_SEC = float(os.getenv("GEMINI_TIMEOUT_SEC", "30"))
+
+# 연속 사이클 오류 한도·UNKNOWN 주문 시한 (T09b-2c). 닿으면 RISK 중단(신규 매수만 차단, 청산은 계속)이 걸리고
+# 사람이 `python -m risk resume` 으로 풀어야 한다.
+# MAX_CONSECUTIVE_ERRORS: 매매 사이클이 이 횟수만큼 연속으로 대조·API·네트워크 오류로 실패하면 건다(1시간 주기라 5회 = 5시간).
+# UNKNOWN_TIMEOUT_MINUTES: 응답 불명(UNKNOWN) 주문이 생성 후 이 시간(분) 이상 확정되지 않으면 건다.
+#   ORDER_TIMEOUT_MINUTES(미체결 취소 시도 기준)와는 별개다. 기본 120분 = 1시간 주기 두 번.
+# VERIFY: 기본값은 검증 전 가설이다.
+MAX_CONSECUTIVE_ERRORS = int(os.getenv("MAX_CONSECUTIVE_ERRORS", "5"))
+UNKNOWN_TIMEOUT_MINUTES = float(os.getenv("UNKNOWN_TIMEOUT_MINUTES", "120"))
 
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
 # 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)

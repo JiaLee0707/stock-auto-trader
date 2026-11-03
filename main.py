@@ -22,6 +22,7 @@ import config
 import db
 import market_calendar
 import reconcile
+import risk
 import sizing
 from ai_analyzer import analyze_market_sentiment
 from state import get_bot_state
@@ -126,6 +127,42 @@ def market_windows(now=None) -> dict:
     return result
 
 
+# 연속으로 실패한 매매 사이클 수 (T09b-2c). 메모리에만 둔다 — 재시작하면 0 에서 시작한다.
+_ERROR_STREAK = risk.ErrorStreak()
+
+
+def _cycle_failed(label: str) -> None:
+    """
+    매매 사이클이 대조·API·네트워크 오류로 실패했다 (T09b-2c). 연속 실패가 한도에 닿으면 RISK 중단(신규 매수만 차단)을 건다.
+    `label` 은 사람이 읽는 짧은 분류다 — 예외 본문은 남기지 않는다(requests 예외에는 URL·토큰이 들어간다).
+    """
+    count = _ERROR_STREAK.failure()
+    limit = config.MAX_CONSECUTIVE_ERRORS
+    logger.warning(f"⚠️ 연속 사이클 실패 {count}/{limit}회 ({label})")
+    if not risk.error_streak_reached(count, limit):
+        return
+    try:
+        risk.halt_for_error_streak(get_bot_state().conn, count=count, max_consecutive=limit, label=label)
+    except Exception as e:
+        logger.critical(f"🚨 연속 실패가 한도({limit}회)에 닿았지만 중단을 기록하지 못했습니다({type(e).__name__}) — 직접 확인이 필요합니다")
+
+
+def _check_unknown_deadline() -> None:
+    """
+    응답 불명(UNKNOWN) 주문이 시한을 넘겼으면 RISK 중단(신규 매수만 차단)을 건다 (T09b-2c).
+    점검에 실패해도 사이클은 계속한다 — 주문 게이트가 따로 막고, 여기서 예외를 올리면 손절까지 건너뛴다.
+    """
+    try:
+        stale = risk.enforce_unknown_deadline(get_bot_state().conn, now=db.now_kst(),
+                                              timeout_minutes=config.UNKNOWN_TIMEOUT_MINUTES)
+    except Exception as e:
+        logger.critical(f"🚨 UNKNOWN 주문 시한 점검 실패({type(e).__name__}) — 이번 사이클은 계속합니다")
+        return
+    if stale:
+        logger.critical(f"🚨 응답 불명(UNKNOWN) 주문 {len(stale)}건이 {config.UNKNOWN_TIMEOUT_MINUTES:g}분을 넘겼습니다 — "
+                        "신규 매수를 중단합니다(청산은 계속). 확인: python -m risk status")
+
+
 def job():
     """1시간마다 실행되는 메인 작업."""
     logger.info("=" * 60)
@@ -152,7 +189,12 @@ def job():
         return
     except Exception as e:
         logger.error(f"❌ 브로커 대조 실패 — 매매 사이클을 건너뜁니다: {e}", exc_info=True)
+        _cycle_failed("브로커 대조")
         return
+
+    # 응답 불명(UNKNOWN) 주문 시한 점검 (T09b-2c). 대조가 끝난 뒤, 매매 사이클(청산 포함) **앞에서** 한다 —
+    # 신규 매수 중단이 이번 사이클부터 적용된다. 대조가 실패한 사이클은 매매를 하지 않으므로 점검도 건너뛴다.
+    _check_unknown_deadline()
 
     # 모의·실전 모두 정규장에만 주문한다.
     # 모의투자는 정규장 주문만 체결되고, 실전투자는 시간외 체결 품질이 불량해 제한한다.
@@ -173,6 +215,7 @@ def job():
         # 주문 가능 구간이 아니면 **AI 분석·시세 조회 등 어떤 API 도 호출하지 않는다.**
         # (로그만 남기고 돌아간다 — 위에서 reconcile 은 이미 돌았다.)
         logger.info(f"   [{mode_label}] 주문 가능 구간 아님 — API 호출 없이 스킵 ({summary})")
+        _ERROR_STREAK.success()
         return
     logger.info(f"   [{mode_label}] 주문 구간 확인 — {summary}")
 
@@ -196,13 +239,17 @@ def job():
 
         # Step 2: 매매 실행 (개장한 시장만)
         run_trading_cycle(ai_score, overseas_open, domestic_open)
+        _ERROR_STREAK.success()
 
     except ConnectionError as e:
         logger.warning(f"🌐 네트워크 연결 끊김 — 다음 사이클에서 재시도: {e}")
+        _cycle_failed("네트워크")
     except TimeoutError as e:
         logger.warning(f"⏱️ 요청 타임아웃 — 다음 사이클에서 재시도: {e}")
+        _cycle_failed("타임아웃")
     except Exception as e:
         logger.error(f"❌ 예상치 못한 오류 — 프로그램은 계속 실행됩니다: {e}", exc_info=True)
+        _cycle_failed("예상 밖 오류")
 
     logger.info(f"✅ 매매 사이클 완료\n")
 

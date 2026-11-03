@@ -355,6 +355,94 @@ def evaluate_and_enforce(conn, *, equity, unknown_pnl_count, now, mode, capital_
     return LimitOutcome(check, tuple(reasons), halted, rebaselined)
 
 
+# ── 연속 사이클 오류·UNKNOWN 주문 시한 (T09b-2c) ─────────────────────────────
+# 둘 다 RISK 중단(신규 매수만 차단·청산 계속)을 건다. STATE 로 걸면 손절까지 멈춘다.
+# 손실 한도 중단이 아니므로 `KV_LOSS_HALT` 표시는 남기지 않는다 — 재개해도 손실 기준선을 다시 잡지 않는다.
+
+
+class ErrorStreak:
+    """연속으로 실패한 매매 사이클 수. 메모리에만 있다 — 재시작하면 0 에서 시작한다."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def failure(self) -> int:
+        self.count += 1
+        return self.count
+
+    def success(self) -> None:
+        self.count = 0
+
+
+def error_streak_reached(count: int, max_consecutive: int) -> bool:
+    """연속 실패가 한도에 닿았는가. 한도와 같으면 걸린다. 순수 함수."""
+    if int(max_consecutive) < 1:
+        raise ValueError(f"max_consecutive 는 1 이상이어야 합니다: {max_consecutive!r}")
+    return int(count) >= int(max_consecutive)
+
+
+def halt_for_error_streak(conn, *, count: int, max_consecutive: int, label: str) -> bool:
+    """연속 실패 한도에 닿았을 때 RISK 중단을 건다. 새로 걸렸으면 True. 기록에 실패하면 예외를 그대로 올린다."""
+    text = f"[연속 오류] 매매 사이클이 {count}회 연속 실패했습니다(한도 {max_consecutive}회, 마지막 원인: {label})"
+    return reconcile.halt_trading(
+        conn, text, "RISK",
+        details={"reasons": ["ERROR_STREAK"], "count": count, "max": max_consecutive, "last": label},
+    )
+
+
+def _minutes_since(raw, now) -> float:
+    """`raw`(ISO 문자열) 이후 지난 분. 읽을 수 없거나 tz 가 없으면 '아주 오래됨'으로 본다(추측하지 않는다)."""
+    if not raw:
+        return float("inf")
+    try:
+        created = type(now).fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return float("inf")
+    if created.tzinfo is None:
+        return float("inf")
+    return (now - created).total_seconds() / 60.0
+
+
+def find_stale_unknown_orders(orders, *, now, timeout_minutes) -> list:
+    """UNKNOWN 주문 중 생성 후 timeout_minutes 이상 지난 것. 한도와 같으면 포함한다. 순수 함수."""
+    if now.tzinfo is None:
+        raise ValueError("now 는 tz-aware 여야 합니다")
+    timeout = float(timeout_minutes)
+    if not (0 < timeout < float("inf")):
+        raise ValueError(f"timeout_minutes 는 0 보다 큰 유한한 숫자여야 합니다: {timeout_minutes!r}")
+    stale = []
+    for order in orders:
+        if order.get("status") != "UNKNOWN":
+            continue
+        if _minutes_since(order.get("created_at"), now) >= timeout:
+            stale.append(order)
+    return stale
+
+
+def enforce_unknown_deadline(conn, *, now, timeout_minutes) -> list:
+    """
+    시한을 넘긴 응답 불명(UNKNOWN) 주문이 있으면 RISK 중단을 걸고, 그 주문 목록을 돌려준다.
+
+    UNKNOWN 은 주문이 나갔는지 모르는 상태다. 체결 조회로 확정되지 않은 채 오래 남으면 보유 수량을 믿을 수 없으므로
+    신규 매수를 멈추고 사람이 브로커에서 확인하게 한다. 청산은 계속한다.
+    시각은 주문 **생성** 시각 기준이다(`updated_at` 은 조회마다 바뀔 수 있어 시계가 밀린다).
+    이미 같거나 더 강한 중단 중이면 `halt_trading` 이 아무것도 바꾸지 않는다(매 사이클 알림 반복 없음).
+    중단 기록에 실패하면 예외를 그대로 올린다.
+    """
+    stale = find_stale_unknown_orders(db.list_open_orders(conn), now=now, timeout_minutes=timeout_minutes)
+    if not stale:
+        return []
+    refs = ", ".join(f"#{o.get('id')} {o.get('symbol')} {o.get('side')}" for o in stale)
+    text = (f"[UNKNOWN 시한] 응답 불명 주문 {len(stale)}건이 {float(timeout_minutes):g}분을 넘겼습니다({refs}) — "
+            "체결 조회로 확정되지 않았습니다. 브로커에서 직접 확인하세요")
+    reconcile.halt_trading(
+        conn, text, "RISK",
+        details={"reasons": ["UNKNOWN_TIMEOUT"], "orders": [o.get("id") for o in stale],
+                 "timeout_minutes": float(timeout_minutes)},
+    )
+    return stale
+
+
 def _loss_baseline_lines(conn) -> list:
     """`python -m risk status` 에 보여 줄 손실 기준선 요약. 읽기 실패도 화면에 그대로 알린다."""
     lines = []
