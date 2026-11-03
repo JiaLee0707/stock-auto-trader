@@ -41,7 +41,7 @@
 - `trader._submit_order`의 첫 두 문장은 `config.assert_order_allowed()` → `risk.assert_order_permitted()` 순서로 두세요. 중복 확인·`orders` 기록보다 앞이어야 합니다(거부된 주문이 SUBMITTED 행을 남기면 이후 손절까지 막힙니다). `tests/test_halt_wiring.py`가 AST로 고정합니다.
 - 주문을 감싸는 곳에서는 `except risk.TradingHalted`를 `except Exception`보다 **앞에** 두고 CRITICAL로 남기세요.
 - 중단 해제(`reconcile.resume_trading`)는 `risk.py` CLI(`python -m risk resume --reason "..."`)에서만 호출하세요. 로그·문서 안내에 사유 없이 해제하는 방법을 쓰지 마세요(소스 스캔 테스트가 막습니다).
-- 중단 종류: STATE(상태 불신, 모든 주문 차단) / RISK(손실 한도, 신규 매수만 차단·청산 계속) / `HALT` 파일(모든 주문 차단, 사람이 직접 삭제). 중단 상태를 읽다 실패하면 닫으세요(모든 주문 차단).
+- 중단 종류: STATE(상태 불신, 모든 주문 차단) / RISK(손실 한도·연속 오류·UNKNOWN 시한 초과, 신규 매수만 차단·청산 계속) / `HALT` 파일(모든 주문 차단, 사람이 직접 삭제). 중단 상태를 읽다 실패하면 닫으세요(모든 주문 차단).
 - 매도는 `positions`에 status=OPEN 행이 있을 때만(`_may_sell_holding`), 매수는 EXTERNAL 보유 위에 쌓지 마세요(`_may_buy_into`). 모르면 팔지 마세요.
 - 판단은 `strategy.decide()`만 고치세요. `trader.py`에 판단 코드를 다시 넣으면 백테스트와 실전이 갈라집니다. 순수 함수(`decide`·`evaluate_exit`·`compute_qty`)는 I/O·시계·설정을 직접 읽지 말고 인자로 받으세요.
 - 새 주문 코드는 `orders`·`positions` 기록을 함께 만드세요(안 하면 첫 사이클에 reconcile이 중단합니다).
@@ -52,13 +52,13 @@
 ## 우선순위 충돌 시
 안전성(주문·상태·킬스위치) > 판단 로직 일관성 > 검증 > 편의.
 
-## 모듈 구조 (T09a 시점으로 갱신)
+## 모듈 구조 (T09b 시점으로 갱신)
 ```
 config.py         설정(env 엄격 파싱), assert_order_allowed()·live_guard_error(), mask(). 옛 설정명 경고
 db.py             sqlite3 상태 저장소(positions·orders·equity_log·kv·halt_events·realized_pnl). 마이그레이션 현재 v4
 state.py          DB 기반 상태(당일 매수 횟수·시각), 지연 프록시 bot_state
 reconcile.py      브로커↔DB 대조, 중단 플래그(halt_trading(kind=STATE|RISK)·resume_trading·halt_events 이력)
-risk.py           킬스위치 게이트(cycle_gate·assert_order_permitted·TradingHalted), HALT 파일, 재개 CLI(python -m risk)
+risk.py           킬스위치 게이트(cycle_gate·assert_order_permitted·TradingHalted), HALT 파일, 재개 CLI(python -m risk), 손실 한도(evaluate_loss_limits·compute_bot_equity·evaluate_and_enforce), 연속 오류(ErrorStreak)·UNKNOWN 시한(enforce_unknown_deadline)
 notifier.py       텔레그램 알림. 설정 없으면 no-op, 실패해도 예외를 던지지 않고 토큰은 로그에 남기지 않음
 models.py         frozen dataclass(MarketSnapshot·PositionView·AccountView·DayCounters·Decision)와 HOLD 사유 상수
 strategy.py       decide() — 매수·청산·수량 판단의 단일 진입점 (순수 함수)
@@ -70,10 +70,10 @@ market_calendar.py  exchange_calendars 래퍼 — 개장·휴장·주문 구간(
 kis_overseas.py   KIS 해외 API. request_read(재시도 가능)/request_order(재시도 없음), _request는 조회용 하위 호환 별칭
 kis_domestic.py   KIS 국내 API. order_body/send_order/get_order_status/get_all_holdings, cancel_order 미구현
 ai_analyzer.py    KIS 시세 + FRED VIX + RSS 뉴스 → Gemini 점수(-100~100)
-trader.py         오케스트레이션: 수집→reconcile→decide()→_submit_order→_settle_order. 판단 코드는 넣지 않음
-main.py           1시간 스케줄러. 시작 시 DB 검증·가드, 사이클마다 reconcile→정규장 구간 판정→run_trading_cycle
+trader.py         오케스트레이션: 수집→reconcile→손실 한도 평가(_make_loss_guard)→decide()→_submit_order→_settle_order. 판단 코드는 넣지 않음
+main.py           1시간 스케줄러. 시작 시 DB 검증·가드, 사이클마다 reconcile→UNKNOWN 시한 점검→정규장 구간 판정→run_trading_cycle. 연속 사이클 오류 집계(_cycle_failed)
 ```
-미사용(T09a 시점): `broker.py`(어댑터 — `_run_cycle`이 받기만 하고 호출하지 않음), `trader._check_sell`(운영 호출 없음, 테스트만 부름). T12에서 통합·삭제를 결정합니다.
+미사용(T09b 시점): `broker.py`(어댑터 — `_run_cycle`이 받기만 하고 호출하지 않음), `trader._check_sell`(운영 호출 없음, 테스트만 부름). T12에서 통합·삭제를 결정합니다.
 
 ## 알려진 제한 (규칙에 가까운 것만 — 전체 미해결 목록은 `docs/CHANGES.md`의 VERIFY 항목)
 - 해외(`IS_OVERSEAS_ENABLED`)는 체결조회·취소·시장가가 미구현이므로 `False`로 유지하세요.
