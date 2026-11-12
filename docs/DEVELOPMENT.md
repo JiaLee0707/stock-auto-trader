@@ -39,7 +39,11 @@
 # 3. 설정값 확인 (민감값은 출력하지 않음)
 .venv/bin/python -c "import config; print(config.IS_MOCK, config.TARGET_TICKER, config.DOMESTIC_TICKER)"
 
-# 4. 모의투자 실행 후 로그 확인
+# 4. 모의투자 첫 실행 (평일 정규장 시간에, 모의 모드에서만. 실전은 시도하지 않는다)
+#    실행 전에 3번 출력의 IS_MOCK 이 True 인지, 아래 status 가 중단 상태가 아닌지 확인하고,
+#    docs/manual_checks.md 절차로 신 TR_ID·지정가(00)를 모의 서버가 받는지 확인한다(실전 전환 전 필수).
+#    DB(DB_PATH, 기본 data/bot.db)는 처음 쓸 때 모드가 기록되며 다른 모드로는 시작이 거부된다. 실전에는 새 경로를 쓴다.
+.venv/bin/python -m risk status
 .venv/bin/python main.py
 tail -f logs/bot.log
 ```

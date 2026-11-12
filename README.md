@@ -1,6 +1,6 @@
 # KIS ETF 자동매매 봇 (나스닥 스노우볼)
 
-한국투자증권(KIS) OpenAPI로 국내 상장 ETF와 해외 ETF(QQQ)를 자동매매하는 Python 3.12 봇.
+한국투자증권(KIS) OpenAPI로 국내 상장 ETF를 자동매매하는 Python 3.12 봇. 해외 ETF(QQQ) 코드는 있으나 체결조회·취소·시장가가 미구현이라 꺼 두며(`IS_OVERSEAS_ENABLED=false`), 켜면 시작 시 종료합니다.
 macOS 로컬에서 `schedule`로 1시간 주기 실행.
 
 ## 현재 상태
@@ -125,7 +125,7 @@ Python 버전: `.python-version` = `3.12.15`
 | `MAX_BUYS_PER_DAY` | `2` | 종목당 하루 최대 매수 횟수. **`0`이면 신규 매수 전면 차단** |
 | `MIN_BUY_INTERVAL_HOURS` | `2.0` | 직전 매수 후 최소 대기(시간), 2회차부터 |
 | `ORDER_TYPE` | `limit` | **매수** 주문 유형 기본값. 청산은 사유별 `EXIT_ORDER_TYPE_*` 가 우선 (T04/T06) |
-| `DB_PATH` | `data/bot.db` | 상태 SQLite 경로 (T03) |
+| `DB_PATH` | `data/bot.db` | 상태 SQLite 경로 (T03). 이 DB 를 처음 쓴 모드(모의/실전)를 기록하고 다른 모드로는 시작을 거부합니다(T09b-4). 실전에는 모의와 다른 새 경로를 쓰세요 |
 | `RECONCILE_AUTOFIX` | `false` | 브로커↔DB 불일치 시 자동 보정 여부. 기본은 보정 없이 **매매 중단**만 (T03) |
 | `ORDER_PRICE_TICKS` | `1` | 지정가를 현재가에서 몇 호가 옮길지. 매수 +N틱, 매도 −N틱. `0`이면 현재가 그대로 (T04) |
 | `ORDER_TIMEOUT_MINUTES` | `30` | 미체결 주문을 이 시간까지 기다렸다가 취소 (T04) |
