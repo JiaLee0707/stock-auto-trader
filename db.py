@@ -76,6 +76,10 @@ KV_PEAK_EQUITY = "peak_equity"
 KV_HALT_KIND = "trading_halted_kind"      # "STATE" | "RISK" (T09a)
 KV_HALT_AT = "trading_halted_at"          # 중단 시작 시각 (T09a)
 
+KV_BOT_MODE = "bot_mode"          # 이 DB 를 처음 쓴 모드 "MOCK" | "LIVE" (T09b-4)
+# 이 표들에 행이 하나라도 있으면 "이전 기록이 있는 DB" 로 본다. kv 는 보지 않는다(기준선 같은 키가 늘 있을 수 있다).
+_HISTORY_TABLES = ("orders", "positions", "equity_log", "realized_pnl", "halt_events", "daily_counters")
+
 SCHEMA_VERSION = 4
 
 # 잠금 대기 시간(ms). 잠긴 DB 를 오래 붙잡고 있지 않도록 짧게 잡는다.
@@ -333,6 +337,37 @@ def set_kv(conn: sqlite3.Connection, key: str, value) -> None:
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, None if value is None else str(value)),
         )
+
+
+def bot_mode_label(is_mock: bool) -> str:
+    """`config.IS_MOCK` 를 DB 에 남길 모드 문자열로 바꾼다 (T09b-4)."""
+    return "MOCK" if is_mock else "LIVE"
+
+
+def has_state_history(conn: sqlite3.Connection) -> bool:
+    """주문·포지션·자산·실현손익·중단 이력·당일 카운터 중 하나라도 행이 있는가 (T09b-4)."""
+    for table in _HISTORY_TABLES:
+        if conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None:
+            return True
+    return False
+
+
+def verify_bot_mode(conn: sqlite3.Connection, is_mock: bool) -> str | None:
+    """
+    이 DB 를 쓴 모드와 지금 모드가 같은지 확인한다 (T09b-4). 문제가 있으면 사유 문자열, 없으면 None.
+
+    처음 쓰는 DB(기록 없음)이고 문제가 없으면 지금 모드를 기록한다. 거부할 때는 기록을 바꾸지 않는다.
+    DB 를 읽지 못하면 예외를 그대로 올린다(호출부가 시작을 거부한다).
+    """
+    current = bot_mode_label(is_mock)
+    recorded = get_kv(conn, KV_BOT_MODE)
+    error = config.bot_mode_error(
+        recorded=recorded, current=current,
+        has_history=(recorded is None and has_state_history(conn)),
+    )
+    if error is None and recorded is None:
+        set_kv(conn, KV_BOT_MODE, current)
+    return error
 
 
 def config_hash() -> str:

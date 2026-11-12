@@ -179,6 +179,33 @@ def enforce_risk_config() -> None:
         raise SystemExit(1)
 
 
+BOT_MODES = ("MOCK", "LIVE")
+
+
+def bot_mode_error(*, recorded, current, has_history) -> str | None:
+    """
+    상태 DB 를 쓴 모드(MOCK/LIVE)와 지금 모드가 같은지 판정한다 (T09b-4). 문제가 있으면 사유 문자열, 없으면 None. 순수 함수.
+
+    모의 DB 의 포지션·주문·손실 기준선·고점이 실전 첫 사이클로 이어지면 안 되므로 **어느 방향이든** 다르면 거부한다.
+    기록이 없는데 이전 기록(주문·포지션 등)이 있는 DB 는 어떤 모드로 쓰였는지 알 수 없다 — 실전으로는 시작하지 않는다.
+    (모의로는 시작하고 호출부가 기록한다: 실전을 한 번도 돌리지 않았으므로 기존 DB 는 모의 DB 로 본다.)
+    """
+    if current not in BOT_MODES:
+        return f"현재 모드 {current!r} 를 알 수 없습니다(MOCK 또는 LIVE 여야 합니다)"
+    if recorded is None:
+        if has_history and current == "LIVE":
+            return ("이 DB 에는 이전 기록(주문·포지션·자산 등)이 있는데 어떤 모드로 쓰였는지 기록이 없습니다. "
+                    "모의 기록이 실전 첫 사이클로 이어질 수 있으므로 실전으로 시작하지 않습니다. 실전에는 새 DB 경로(DB_PATH)를 쓰세요")
+        return None
+    if recorded not in BOT_MODES:
+        return (f"DB 에 기록된 모드({recorded!r})를 알아볼 수 없습니다. 어떤 모드로 쓰인 DB 인지 모르므로 시작하지 않습니다. "
+                "DB 를 확인하거나 새 DB 경로(DB_PATH)를 쓰세요")
+    if recorded != current:
+        return (f"이 DB 는 {recorded} 모드로 쓰였는데 지금 {current} 모드로 시작하려 합니다. "
+                "모의와 실전의 포지션·주문·손실 기준선이 섞이면 안 되므로 시작하지 않습니다. 모드마다 다른 DB 경로(DB_PATH)를 쓰세요")
+    return None
+
+
 def assert_order_allowed() -> None:
     """
     주문 직전 방어선. 실전 모드인데 확인값이 없으면 예외를 던진다.

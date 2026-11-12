@@ -377,6 +377,23 @@ def quick_test():
     logger.info(f"✅ 퀵 테스트 완료 - 모든 기본 검증 성공\n")
 
 
+def _verify_db_mode(conn) -> None:
+    """
+    상태 DB 를 쓴 모드(MOCK/LIVE)와 지금 모드가 같은지 확인한다 (T09b-4). 다르면 시작을 거부한다(SystemExit).
+
+    모의 DB 의 포지션·주문·손실 기준선·고점이 실전 첫 사이클로 이어지는 것을 막는다. 이 DB 를 처음 쓰면 지금 모드를 기록한다.
+    확인하지 못해도(DB 오류) 시작하지 않는다 — 모르는 채로 시작하지 않는다. 로그에는 예외 본문을 남기지 않는다.
+    """
+    try:
+        error = db.verify_bot_mode(conn, config.IS_MOCK)
+    except Exception as e:
+        logger.critical(f"🚨 DB 모드 기록을 확인하지 못했습니다({type(e).__name__}) — 시작을 거부합니다")
+        raise SystemExit(1)
+    if error:
+        logger.critical(f"🚨 시작을 거부합니다: {error}")
+        raise SystemExit(1)
+
+
 def main():
     # 시작 로그 첫 줄: 현재 모드와 도메인 호스트명. 키·계좌번호는 출력하지 않는다 (T01b)
     mode_label = "모의" if config.IS_MOCK else "실전"
@@ -403,6 +420,7 @@ def main():
     except db.DatabaseUnavailable as e:
         logger.critical(f"🚨 상태 DB 사용 불가 — 시작을 거부합니다: {e}")
         raise SystemExit(1)
+    _verify_db_mode(probe)    # T09b-4: 이 DB 를 쓴 모드와 지금 모드가 다르면 여기서 종료한다
     probe.close()   # 검증용 연결은 바로 닫는다(실제 사용은 get_bot_state() 싱글턴이 한다)
 
     env_mode = "모의투자" if config.IS_MOCK else "실전투자"
