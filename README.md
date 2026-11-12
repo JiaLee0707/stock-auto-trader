@@ -277,6 +277,8 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 문제 해결 |
 | [docs/manual_checks.md](docs/manual_checks.md) | 모의 서버에서 사람이 직접 확인하는 절차(신 TR_ID·지정가 등) |
 | [docs/kis_api_fields.md](docs/kis_api_fields.md) | KIS API 필드·TR_ID 사실 모음(포털 표 기준. 여기 없는 API는 추측 금지) |
+| [docs/modules.md](docs/modules.md) | 모듈 구조 (AGENTS.md에서 분리) |
+| [docs/strategy.md](docs/strategy.md) | 전략 기본값과 구현 상태 (AGENTS.md에서 분리) |
 | [docs/archive/](docs/archive/) | 이전 문서 보관 (내용이 낡음. 참고용으로만) |
 
 코드 구조는 [AGENTS.md](AGENTS.md)의 "모듈 구조" 절을 참고하세요.
