@@ -46,7 +46,7 @@
 - 판단은 `strategy.decide()`만 고치세요. `trader.py`에 판단 코드를 다시 넣으면 백테스트와 실전이 갈라집니다. 순수 함수(`decide`·`evaluate_exit`·`compute_qty`)는 I/O·시계·설정을 직접 읽지 말고 인자로 받으세요.
 - 새 주문 코드는 `orders`·`positions` 기록을 함께 만드세요(안 하면 첫 사이클에 reconcile이 중단합니다).
 - DB 스키마는 `db._MIGRATIONS` **끝에만** 추가하고 `SCHEMA_VERSION`을 올리세요. 기존 항목은 수정하지 마세요.
-- 알림·로그에 `str(e)`를 쓰지 마세요. `requests` 예외 메시지에는 URL(토큰)이 들어 있습니다. 예외 타입명과 HTTP 상태 코드만 남기세요.
+- 알림·로그·DB 사유(`orders.raw_response`·중단 사유)에 예외 문구를 쓰지 마세요. `{e}`·`str(e)`·`repr(e)`·`exc_info=True`·`logger.exception(`·`traceback.*` 는 모두 금지입니다. `requests` 예외 메시지에는 요청 URL(쿼리의 계좌 구분 값·토큰이 들어갈 수 있음)이 들어 있습니다. `errfmt.exc_summary(e)`(예외 타입·HTTP 상태·프로젝트 안 위치·원인 타입만)를 쓰세요. `tests/test_exc_leak_scan.py` 가 루트 `*.py` 를 AST 로 검사하며 어기면 테스트가 실패합니다.
 - 테스트는 `tests/conftest.py`가 DB·일봉 경로·텔레그램·HALT 파일을 격리합니다. 안전 규칙 테스트는 규칙을 깨는 변이를 넣었을 때 실제로 실패하는지 확인하세요.
 
 ## 우선순위 충돌 시

@@ -1,6 +1,6 @@
 # 모듈 구조 (AGENTS.md에서 이동)
 
-## 모듈 구조 (T09b 시점으로 갱신)
+## 모듈 구조 (T09b-5 시점으로 갱신)
 ```
 config.py         설정(env 엄격 파싱), assert_order_allowed()·live_guard_error(), mask(), bot_mode_error()(DB 모드 판정, 순수). 옛 설정명 경고
 db.py             sqlite3 상태 저장소(positions·orders·equity_log·kv·halt_events·realized_pnl). 마이그레이션 현재 v4. DB 모드 기록(verify_bot_mode·has_state_history, kv `bot_mode`)
@@ -8,6 +8,7 @@ state.py          DB 기반 상태(당일 매수 횟수·시각), 지연 프록�
 reconcile.py      브로커↔DB 대조, 중단 플래그(halt_trading(kind=STATE|RISK)·resume_trading·halt_events 이력)
 risk.py           킬스위치 게이트(cycle_gate·assert_order_permitted·TradingHalted), HALT 파일, 재개 CLI(python -m risk), 손실 한도(evaluate_loss_limits·compute_bot_equity·evaluate_and_enforce), 연속 오류(ErrorStreak)·UNKNOWN 시한(enforce_unknown_deadline)
 notifier.py       텔레그램 알림. 설정 없으면 no-op, 실패해도 예외를 던지지 않고 토큰은 로그에 남기지 않음
+errfmt.py         예외 요약 exc_summary(exc) — 타입·HTTP 상태(100~599)·프로젝트 안 마지막 프레임 위치·원인 체인 타입만 돌려줌(예외 문구를 읽지 않음). 표준 라이브러리만 import. 로그·DB 사유에는 `{e}` 대신 이것을 씀
 models.py         frozen dataclass(MarketSnapshot·PositionView·AccountView·DayCounters·Decision)와 HOLD 사유 상수
 strategy.py       decide() — 매수·청산·수량 판단의 단일 진입점 (순수 함수)
 exit_rules.py     evaluate_exit() — 청산 규칙 (순수 함수)
@@ -22,4 +23,6 @@ trader.py         오케스트레이션: 수집→reconcile→손실 한도 평�
 main.py           1시간 스케줄러. 시작 시 DB 검증·가드(_verify_db_mode: 이 DB 를 쓴 모드와 다르면 종료), 사이클마다 reconcile→UNKNOWN 시한 점검→정규장 구간 판정→run_trading_cycle. 연속 사이클 오류 집계(_cycle_failed)
 ```
 미사용(T09b 시점): `broker.py`(어댑터 — `_run_cycle`이 받기만 하고 호출하지 않음), `trader._check_sell`(운영 호출 없음, 테스트만 부름). T12에서 통합·삭제를 결정합니다.
+
+예외 문구 규약(T09b-5): `tests/test_exc_leak_scan.py` 가 루트 `*.py`(errfmt.py 제외)를 AST 로 검사해 예외 문구가 로그·DB 사유로 새는 코드를 막습니다. 메시지를 이 프로젝트 코드가 만드는 예외(`SAFE_HANDLER_TYPES`: TradingHalted·DuplicateOrderBlocked·EquityUnavailable·DatabaseUnavailable·BaselineError)를 잡는 핸들러만 `{e}` 를 쓸 수 있습니다.
 
