@@ -41,6 +41,8 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from errfmt import exc_summary
+
 logger = logging.getLogger("bot")
 
 # 절대 규칙 9: 시간은 항상 tz-aware. 일봉은 한국장 기준이므로 KST를 쓴다.
@@ -89,7 +91,7 @@ def _to_bar(row: dict) -> dict:
             "volume": float(row.get("volume", 0) or 0),
         }
     except (KeyError, TypeError, ValueError) as e:
-        raise ValueError(f"일봉 행 형식이 잘못되었습니다: {row!r} ({e})") from e
+        raise ValueError(f"일봉 행 형식이 잘못되었습니다: {row!r} ({exc_summary(e)})") from e
 
 
 def kis_rows_to_bars(rows: list[dict]) -> list[dict]:
@@ -179,7 +181,7 @@ def load_meta(symbol: str) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
-        logger.warning(f"[history] 메타 파일 읽기 실패 ({path}): {e}")
+        logger.warning(f"[history] 메타 파일 읽기 실패 ({path}): {exc_summary(e)}")
         return {}
 
 

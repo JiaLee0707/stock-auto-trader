@@ -24,6 +24,7 @@ from google.genai import types
 import config
 import kis_domestic
 import kis_overseas
+from errfmt import exc_summary
 
 logger = logging.getLogger("bot")
 
@@ -66,7 +67,7 @@ def _safe(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except Exception as e:
-        logger.warning(f"시장 데이터 수집 실패 ({getattr(fn, '__name__', fn)}): {e}")
+        logger.warning(f"시장 데이터 수집 실패 ({getattr(fn, '__name__', fn)}): {exc_summary(e)}")
         return None
 
 
@@ -184,7 +185,7 @@ def fetch_news_headlines() -> list[str]:
             resp.raise_for_status()
             root = ET.fromstring(resp.content)
         except Exception as e:
-            logger.warning(f"뉴스 피드 수집 실패 ({feed_url[:60]}...): {e}")
+            logger.warning(f"뉴스 피드 수집 실패 ({feed_url[:60]}...): {exc_summary(e)}")
             continue
 
         # RSS 2.0 <item> / Atom <entry> 모두 지원
@@ -313,7 +314,7 @@ def _generate_json(prompt: str) -> str:
             retryable = "429" in str(e) or "503" in str(e) or status in (429, 503)
             if not retryable or attempt == _MAX_ATTEMPTS - 1:
                 raise
-            logger.warning(f"Gemini 일시 오류 ({attempt + 1}/{_MAX_ATTEMPTS}), {_RETRY_SLEEP_SEC}초 후 재시도: {e}")
+            logger.warning(f"Gemini 일시 오류 ({attempt + 1}/{_MAX_ATTEMPTS}), {_RETRY_SLEEP_SEC}초 후 재시도: {exc_summary(e)}")
             time.sleep(_RETRY_SLEEP_SEC)
     raise last_error
 
@@ -347,8 +348,8 @@ def analyze_market_sentiment() -> dict:
         logger.info(f"AI 분석 완료 → 점수: {score}, 사유: {result['reason']}")
         return {"score": score, "reason": result["reason"]}
     except ConnectionError as e:
-        logger.warning(f"Gemini API 네트워크 오류: {e} — 기본값 0 반환")
+        logger.warning(f"Gemini API 네트워크 오류: {exc_summary(e)} — 기본값 0 반환")
         return {"score": 0, "reason": "네트워크 오류로 분석 실패"}
     except Exception as e:
-        logger.error(f"AI 분석 실패: {e} — 기본값 0 반환")
+        logger.error(f"AI 분석 실패: {exc_summary(e)} — 기본값 0 반환")
         return {"score": 0, "reason": "AI 분석 실패, 중립 처리"}

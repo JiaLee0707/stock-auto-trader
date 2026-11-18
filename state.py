@@ -17,6 +17,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import db
+from errfmt import exc_summary
 
 logger = logging.getLogger("bot")
 
@@ -102,7 +103,7 @@ class BotState:
         try:
             parsed = datetime.fromisoformat(raw)
         except ValueError as e:
-            logger.warning(f"[state] last_buy_time 해석 실패 ({ticker}): {raw!r} ({e})")
+            logger.warning(f"[state] last_buy_time 해석 실패 ({ticker}): {raw!r} ({exc_summary(e)})")
             return None
         if parsed.tzinfo is None:
             logger.warning(f"[state] last_buy_time 이 naive 입니다 ({ticker}): {raw!r}")

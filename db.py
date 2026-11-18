@@ -26,6 +26,7 @@ from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import config
+from errfmt import exc_summary
 
 logger = logging.getLogger("bot")
 
@@ -251,7 +252,7 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         except sqlite3.Error as e:
             conn.rollback()
             raise DatabaseUnavailable(
-                f"스키마 마이그레이션 실패 (v{current} → v{version}): {e}"
+                f"스키마 마이그레이션 실패 (v{current} → v{version}): {exc_summary(e)}"
             ) from e
         current = version
 
@@ -272,14 +273,14 @@ def open_db(path: str | os.PathLike | None = None,
         db_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise DatabaseUnavailable(
-            f"DB 디렉터리를 만들 수 없습니다 ({db_path.parent}): {e}"
+            f"DB 디렉터리를 만들 수 없습니다 ({db_path.parent}): {exc_summary(e)}"
         ) from e
 
     try:
         conn = sqlite3.connect(str(db_path), timeout=BUSY_TIMEOUT_MS / 1000.0,
                                isolation_level="DEFERRED")
     except sqlite3.Error as e:
-        raise DatabaseUnavailable(f"DB 열기 실패 ({db_path}): {e}") from e
+        raise DatabaseUnavailable(f"DB 열기 실패 ({db_path}): {exc_summary(e)}") from e
 
     try:
         _configure(conn)
@@ -298,10 +299,10 @@ def open_db(path: str | os.PathLike | None = None,
     except sqlite3.OperationalError as e:
         # 잠김(database is locked)·읽기 전용 등
         conn.close()
-        raise DatabaseUnavailable(f"DB 잠김/접근 불가 ({db_path}): {e}") from e
+        raise DatabaseUnavailable(f"DB 잠김/접근 불가 ({db_path}): {exc_summary(e)}") from e
     except sqlite3.DatabaseError as e:
         conn.close()
-        raise DatabaseUnavailable(f"DB 손상 의심 ({db_path}): {e}") from e
+        raise DatabaseUnavailable(f"DB 손상 의심 ({db_path}): {exc_summary(e)}") from e
 
     return conn
 
@@ -317,7 +318,7 @@ def transaction(conn: sqlite3.Connection):
         with conn:
             yield conn
     except sqlite3.Error as e:
-        logger.error(f"[db] 트랜잭션 실패 — 롤백했습니다: {e}")
+        logger.error(f"[db] 트랜잭션 실패 — 롤백했습니다: {exc_summary(e)}")
         raise
 
 
@@ -472,7 +473,7 @@ def _position_row(row: sqlite3.Row) -> dict:
             d["entry_signal"] = json.loads(raw)
         except json.JSONDecodeError as e:
             # 신호 JSON 이 깨져도 포지션 자체는 살린다. 다만 조용히 넘기지 않는다.
-            logger.warning(f"[db] entry_signal_json 해석 실패 ({d.get('symbol')}): {e}")
+            logger.warning(f"[db] entry_signal_json 해석 실패 ({d.get('symbol')}): {exc_summary(e)}")
             d["entry_signal"] = None
     else:
         d["entry_signal"] = None

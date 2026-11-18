@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import config
 import db
 import reconcile
+from errfmt import exc_summary
 
 logger = logging.getLogger("bot")
 
@@ -74,7 +75,7 @@ def gate_status(conn) -> tuple[str, str]:
         reason = reconcile.halt_reason(conn) or "사유 미기록"
     except Exception as e:
         logger.critical(
-            f"🚨 중단 상태를 읽지 못했습니다({type(e).__name__}: {e}) — 안전을 위해 모든 주문을 막습니다"
+            f"🚨 중단 상태를 읽지 못했습니다({exc_summary(e)}) — 안전을 위해 모든 주문을 막습니다"
         )
         return FULL_STOP, "중단 상태를 읽지 못해 모든 주문을 막습니다"
     if kind == "RISK":
@@ -232,8 +233,16 @@ def compute_bot_equity(*, capital_cap_krw, realized_pnl_krw, open_positions, pri
     return equity
 
 
+class BaselineError(ValueError):
+    """저장된 손실 기준선을 읽을 수 없다.
+
+    메시지는 이 모듈이 만드는 고정 문구(예외 타입 이름·키 이름뿐)여야 한다 — 외부 예외 문구를 끼우지 않는다.
+    그래서 스캔 테스트(tests/test_exc_leak_scan.py)가 이 예외를 잡는 핸들러의 `{e}` 를 허용한다.
+    """
+
+
 def _parse_baseline(raw: str) -> dict:
-    """저장된 기준선(JSON)을 읽는다. 읽을 수 없으면 ValueError — 추측해서 채우지 않는다."""
+    """저장된 기준선(JSON)을 읽는다. 읽을 수 없으면 BaselineError(ValueError) — 추측해서 채우지 않는다."""
     try:
         data = json.loads(raw)
         parsed = {
@@ -245,10 +254,10 @@ def _parse_baseline(raw: str) -> dict:
         }
         date.fromisoformat(parsed["day"])
     except (ValueError, TypeError, KeyError) as e:
-        raise ValueError(f"손실 기준선을 읽을 수 없습니다({type(e).__name__})") from e
+        raise BaselineError(f"손실 기준선을 읽을 수 없습니다({type(e).__name__})") from e
     for key in ("peak", "day_start", "last_equity"):
         if not math.isfinite(parsed[key]):
-            raise ValueError(f"손실 기준선 값이 유한하지 않습니다({key})")
+            raise BaselineError(f"손실 기준선 값이 유한하지 않습니다({key})")
     return parsed
 
 
@@ -302,7 +311,7 @@ def evaluate_and_enforce(conn, *, equity, unknown_pnl_count, now, mode, capital_
     if raw is not None and not reset:
         try:
             base = _parse_baseline(raw)
-        except ValueError as e:
+        except BaselineError as e:
             logger.critical(f"🚨 [손실 한도] {e} — 신규 매수를 중단합니다. 원인을 확인한 뒤 "
                             "python -m risk resume --reason ... 로 기준선을 다시 만드세요")
             changed = _halt_for_loss(conn, str(e), {"reasons": [BASELINE_CORRUPT]})

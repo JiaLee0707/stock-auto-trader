@@ -55,6 +55,7 @@ import risk
 import sizing
 import strategy
 from state import bot_state, get_bot_state
+from errfmt import exc_summary
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -289,7 +290,7 @@ def _stored_order_refs(order: dict) -> dict | None:
     try:
         payload = json.loads(raw)
     except (TypeError, ValueError) as e:
-        logger.error(f"[주문] raw_response 해석 실패 (#{order.get('id')}): {e}")
+        logger.error(f"[주문] raw_response 해석 실패 (#{order.get('id')}): {exc_summary(e)}")
         return None
     return _order_refs_from_response(payload)
 
@@ -424,16 +425,16 @@ def _submit_order(conn, *, market: str, ticker: str, side: str, qty: float,
     def on_uncertain(exc):
         """결과 미확정 → UNKNOWN. 이 종목은 다음 사이클 조회로 확정될 때까지 신규 주문 금지."""
         db.update_order_status(conn, order_id, status="UNKNOWN",
-                               raw_response={"error": str(exc)})
+                               raw_response={"error": exc_summary(exc)})
         logger.error(
             f"⚠️ 주문 #{order_id} 결과 미확정(UNKNOWN) — 재시도하지 않습니다. "
-            f"{market} {ticker} 은 조회로 확정될 때까지 신규 주문이 막힙니다: {exc}"
+            f"{market} {ticker} 은 조회로 확정될 때까지 신규 주문이 막힙니다: {exc_summary(exc)}"
         )
 
     try:
         result = send(body, on_uncertain)
     except Exception as e:
-        logger.error(f"❌ 주문 #{order_id} 실패 — {market} {ticker} {side}: {e}")
+        logger.error(f"❌ 주문 #{order_id} 실패 — {market} {ticker} {side}: {exc_summary(e)}")
         raise
 
     refs = _order_refs_from_response(result)
@@ -493,10 +494,10 @@ def _settle_order(conn, order: dict, status_fn, cancel_fn=None) -> "db.OrderStat
     try:
         st = _call_status_fn(status_fn, order, refs)
     except NotImplementedError as e:
-        logger.error(f"[체결조회] {market} {symbol} 미구현 — 주문 #{order['id']} 상태 미확정: {e}")
+        logger.error(f"[체결조회] {market} {symbol} 미구현 — 주문 #{order['id']} 상태 미확정: {exc_summary(e)}")
         return None
     except Exception as e:
-        logger.error(f"[체결조회] 실패 — 주문 #{order['id']} 상태를 바꾸지 않습니다: {e}")
+        logger.error(f"[체결조회] 실패 — 주문 #{order['id']} 상태를 바꾸지 않습니다: {exc_summary(e)}")
         return None
 
     prev_filled = float(order.get("filled_qty") or 0.0)
@@ -565,10 +566,10 @@ def _cancel_stale_order(conn, order: dict, st, cancel_fn) -> None:
     try:
         result = cancel_fn(remaining)
     except NotImplementedError as e:
-        _halt_due_to_unfilled(conn, order, remaining, f"취소 미구현: {e}")
+        _halt_due_to_unfilled(conn, order, remaining, f"취소 미구현: {exc_summary(e)}")
         return
     except Exception as e:
-        _halt_due_to_unfilled(conn, order, remaining, f"취소 실패: {e}")
+        _halt_due_to_unfilled(conn, order, remaining, f"취소 실패: {exc_summary(e)}")
         return
 
     db.update_order_status(conn, order["id"], status="CANCELED",
@@ -608,7 +609,7 @@ def _halt_due_to_unfilled(conn, order: dict, remaining: float, why: str) -> None
                                raw_response={"halt_reason": reason})
     except Exception as e:
         # 상태 기록조차 못 하면 그 사실을 반드시 알린다(삼키지 않는다).
-        logger.critical(f"🚨🚨 미체결 주문 상태 기록에 실패했습니다 — 즉시 확인하세요: {e}")
+        logger.critical(f"🚨🚨 미체결 주문 상태 기록에 실패했습니다 — 즉시 확인하세요: {exc_summary(e)}")
 
 
 def get_cancelable_order(order_no: str, *, ticker: str) -> "db.OrderStatus":
@@ -655,7 +656,7 @@ def run_trading_cycle(ai_score: int, overseas_open: bool = True, domestic_open: 
     try:
         conn = get_bot_state().conn
     except Exception as e:
-        logger.error(f"❌ 상태 저장소 접근 실패 — 매매 사이클을 건너뜁니다: {e}")
+        logger.error(f"❌ 상태 저장소 접근 실패 — 매매 사이클을 건너뜁니다: {exc_summary(e)}")
         return
 
     # 킬스위치 게이트 (T09a). reconcile 중단 플래그와 HALT 파일을 함께 본다.
@@ -757,7 +758,7 @@ def _confirm_sell_quantity(prefix: str, market: str, ticker: str, qty: float,
     try:
         fresh = refresh_balance()
     except Exception as e:
-        logger.error(f"⛔ {prefix} 매도 직전 잔고 재조회 실패 — 주문하지 않습니다: {e}")
+        logger.error(f"⛔ {prefix} 매도 직전 잔고 재조회 실패 — 주문하지 않습니다: {exc_summary(e)}")
         return None
 
     actual = float((fresh or {}).get("quantity") or 0.0)
@@ -804,7 +805,7 @@ def _trigger_reconcile_check(what: str) -> None:
     try:
         reconcile.reconcile(_state_conn())
     except Exception as e:
-        logger.error(f"⛔ reconcile 대조 실행 실패 — 수동으로 확인하세요: {e}")
+        logger.error(f"⛔ reconcile 대조 실행 실패 — 수동으로 확인하세요: {exc_summary(e)}")
 
 
 def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_fn,
@@ -856,7 +857,7 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
             pos = pos if pos is not None else db.get_position(_state_conn(), ticker, market)
         except Exception as e:
             # 상태를 못 읽었는데 매도하면 위험하다. 모르면 팔지 않는다.
-            logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매도를 건너뜁니다: {e}")
+            logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매도를 건너뜁니다: {exc_summary(e)}")
             return True
         if pos and pos.get("status") == "EXTERNAL":
             logger.warning(
@@ -921,7 +922,7 @@ def _check_sell(prefix: str, ticker: str, qty: float, profit_rate: float, sell_f
         else:
             _place_sell(prefix, market, ticker, sell_qty, sell_fn, None)
     except Exception as e:
-        logger.error(f"❌ {prefix} 청산({reason}) 주문 실패: {e}")
+        logger.error(f"❌ {prefix} 청산({reason}) 주문 실패: {exc_summary(e)}")
         return True     # 매도 시도는 했다 — 다음 사이클에 다시 판단한다
 
     # 청산은 전량이므로 당일 재진입을 허용한다(부분 매도 상태가 없다).
@@ -962,7 +963,7 @@ def _entry_signal_meta(symbol: str, bars, now: datetime) -> dict:
             last_date = str(bars["date"].iloc[-1])
         except Exception as e:
             # 메타는 로그용이다 — 실패를 삼키지 않고 알리되 판단은 계속한다.
-            logger.warning(f"⚠️ [{symbol}] 확정 봉 날짜를 읽지 못했습니다: {e}")
+            logger.warning(f"⚠️ [{symbol}] 확정 봉 날짜를 읽지 못했습니다: {exc_summary(e)}")
     return {"confirmed_bars": count, "last_confirmed_date": last_date}
 
 
@@ -1028,7 +1029,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         try:
             refresh_peak()
         except Exception as e:
-            logger.warning(f"⚠️ [{prefix}] 진입 후 고점 갱신 실패 — 청산 판단은 계속합니다: {e}")
+            logger.warning(f"⚠️ [{prefix}] 진입 후 고점 갱신 실패 — 청산 판단은 계속합니다: {exc_summary(e)}")
 
     logger.info(
         f"[{prefix} 현황] 현재가: {price_fmt(current_price)} | 평균단가: {price_fmt(avg_price)} | "
@@ -1044,7 +1045,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             _resolve_open_orders(_state_conn(), market=market, ticker=ticker,
                                  status_fn=status_fn, cancel_fn=cancel_fn)
         except Exception as e:
-            logger.error(f"⛔ [{prefix}] 미확정 주문 조회 실패 — 이번 사이클 판단(청산 포함)을 건너뜁니다: {e}")
+            logger.error(f"⛔ [{prefix}] 미확정 주문 조회 실패 — 이번 사이클 판단(청산 포함)을 건너뜁니다: {exc_summary(e)}")
             return
 
     # ── 손실 한도 평가 (T09b-2b-2) ────────────────────────
@@ -1086,7 +1087,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             bars_meta = _entry_signal_meta(ticker, bars, now)
         except Exception as e:
             bars_received = False
-            logger.error(f"⛔ [{prefix}] 확정 일봉 조회 실패 — 이번 사이클 매수를 보류합니다: {e}")
+            logger.error(f"⛔ [{prefix}] 확정 일봉 조회 실패 — 이번 사이클 매수를 보류합니다: {exc_summary(e)}")
 
     # ── 카운터·자본·포지션 (I/O) ──────────────────────────
     # 노출·보유 종목 수를 못 읽으면 매수하지 않는다 — 노출을 모르는 채로 사면
@@ -1104,7 +1105,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         # 조회 실패의 **원인을 남긴다** — 예외 타입까지 찍어야 RuntimeError(DB 없음)와
         # DB 쿼리 오류를 로그만 보고 구분할 수 있다. 매수만 보류되고 청산은 계속된다.
         logger.critical(f"❌ [{prefix}] 보유·노출·카운터 조회 실패 — 매수만 보류(청산은 계속): "
-                        f"{type(e).__name__}: {e}")
+                        f"{exc_summary(e)}")
 
     position = _position_view(ticker, market, qty, avg_price)
 
@@ -1195,7 +1196,7 @@ def _position_view(ticker: str, market: str | None, qty: float,
     try:
         row = db.get_position(_state_conn(), ticker, market) or {}
     except Exception as e:
-        logger.error(f"⚠️ 포지션 상세 조회 실패 — 진입 시각·고점 없이 판단합니다: {e}")
+        logger.error(f"⚠️ 포지션 상세 조회 실패 — 진입 시각·고점 없이 판단합니다: {exc_summary(e)}")
         return view
     return models.PositionView(
         qty=view.qty, avg_price=view.avg_price,
@@ -1224,7 +1225,7 @@ def _may_sell_holding(prefix: str, ticker: str, market: str | None, qty: float) 
     try:
         pos = db.get_position(_state_conn(), ticker, market)
     except Exception as e:
-        logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매도하지 않습니다: {e}")
+        logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매도하지 않습니다: {exc_summary(e)}")
         return False
     if pos is None:
         logger.error(
@@ -1276,7 +1277,7 @@ def _execute_sell(prefix: str, ticker: str, decision, market: str | None, qty: f
         logger.critical(f"🚨 {prefix} 킬스위치가 청산({reason}) 주문을 막았습니다 — {e}")
         return
     except Exception as e:
-        logger.error(f"❌ {prefix} 청산({reason}) 주문 실패: {e}")
+        logger.error(f"❌ {prefix} 청산({reason}) 주문 실패: {exc_summary(e)}")
         return
 
     # 청산은 전량이므로 당일 재진입을 허용한다(부분 매도 상태가 없다).
@@ -1320,7 +1321,7 @@ def _may_buy_into(prefix: str, ticker: str, market: str | None) -> bool:
     try:
         pos = db.get_position(_state_conn(), ticker, market)
     except Exception as e:
-        logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매수하지 않습니다: {e}")
+        logger.error(f"⛔ {prefix} 포지션 상태 조회 실패 — 안전을 위해 매수하지 않습니다: {exc_summary(e)}")
         return False
     if pos is not None and pos.get("status") == "EXTERNAL":
         logger.warning(
@@ -1361,7 +1362,7 @@ def _execute_buy(prefix: str, ticker: str, decision, market: str | None,
             logger.critical(f"🚨 [{prefix}] 킬스위치가 매수 주문을 막았습니다 — {e}")
             return
         except Exception as e:
-            logger.error(f"❌ [{prefix}] 매수 주문 실패 — 체결 확인 전이므로 횟수 미기록: {e}")
+            logger.error(f"❌ [{prefix}] 매수 주문 실패 — 체결 확인 전이므로 횟수 미기록: {exc_summary(e)}")
             return
         bot_state.record_buy(ticker)
         logger.info(

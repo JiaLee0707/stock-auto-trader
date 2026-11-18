@@ -27,6 +27,7 @@ import sizing
 from ai_analyzer import analyze_market_sentiment
 from state import get_bot_state
 from trader import run_trading_cycle
+from errfmt import exc_summary
 
 # ── 로그 설정 ────────────────────────────────────────────
 os.makedirs("logs", exist_ok=True)
@@ -188,7 +189,7 @@ def job():
         logger.critical(f"🚨 상태 DB 사용 불가 — 매매 사이클을 건너뜁니다: {e}")
         return
     except Exception as e:
-        logger.error(f"❌ 브로커 대조 실패 — 매매 사이클을 건너뜁니다: {e}", exc_info=True)
+        logger.error(f"❌ 브로커 대조 실패 — 매매 사이클을 건너뜁니다: {exc_summary(e)}")
         _cycle_failed("브로커 대조")
         return
 
@@ -233,8 +234,8 @@ def job():
         except Exception as e:
             ai_score = None   # 일부만 채워졌어도 점수는 신뢰하지 않는다
             logger.error(
-                f"🤖 AI 분석 단계 실패({type(e).__name__}) — 점수 없이 매매 사이클을 계속합니다"
-                f"(신규 매수만 보류, 청산은 계속): {e}"
+                f"🤖 AI 분석 단계 실패({exc_summary(e)}) — 점수 없이 매매 사이클을 계속합니다"
+                "(신규 매수만 보류, 청산은 계속)"
             )
 
         # Step 2: 매매 실행 (개장한 시장만)
@@ -242,13 +243,13 @@ def job():
         _ERROR_STREAK.success()
 
     except ConnectionError as e:
-        logger.warning(f"🌐 네트워크 연결 끊김 — 다음 사이클에서 재시도: {e}")
+        logger.warning(f"🌐 네트워크 연결 끊김 — 다음 사이클에서 재시도: {exc_summary(e)}")
         _cycle_failed("네트워크")
     except TimeoutError as e:
-        logger.warning(f"⏱️ 요청 타임아웃 — 다음 사이클에서 재시도: {e}")
+        logger.warning(f"⏱️ 요청 타임아웃 — 다음 사이클에서 재시도: {exc_summary(e)}")
         _cycle_failed("타임아웃")
     except Exception as e:
-        logger.error(f"❌ 예상치 못한 오류 — 프로그램은 계속 실행됩니다: {e}", exc_info=True)
+        logger.error(f"❌ 예상치 못한 오류 — 프로그램은 계속 실행됩니다: {exc_summary(e)}")
         _cycle_failed("예상 밖 오류")
 
     logger.info(f"✅ 매매 사이클 완료\n")
@@ -281,7 +282,7 @@ def log_capital_summary():
                 entries.append((config.TARGET_TICKER, config.TARGET_TICKER_NAME,
                                 price_usd * rate))
             except Exception as e:
-                logger.warning(f"[자본 점검] 해외 조회 실패: {e}")
+                logger.warning(f"[자본 점검] 해외 조회 실패: {exc_summary(e)}")
 
         if config.IS_DOMESTIC_ENABLED:
             try:
@@ -292,7 +293,7 @@ def log_capital_summary():
                 entries.append((config.DOMESTIC_TICKER, config.DOMESTIC_TICKER_NAME,
                                 float(kis_domestic.get_domestic_price(config.DOMESTIC_TICKER))))
             except Exception as e:
-                logger.warning(f"[자본 점검] 국내 조회 실패: {e}")
+                logger.warning(f"[자본 점검] 국내 조회 실패: {exc_summary(e)}")
 
         if equity <= 0:
             logger.warning("[자본 점검] 자본을 조회하지 못해 요약을 건너뜁니다")
@@ -318,7 +319,7 @@ def log_capital_summary():
         )
     except Exception as e:
         # 이 로그가 실패해도 봇은 계속 돌아야 한다. 다만 조용히 넘기지 않는다.
-        logger.error(f"[자본 점검] 요약 생성 실패: {e}", exc_info=True)
+        logger.error(f"[자본 점검] 요약 생성 실패: {exc_summary(e)}")
 
 
 def quick_test():
@@ -358,7 +359,7 @@ def quick_test():
         sentiment = analyze_market_sentiment()
         logger.info(f"✓ AI 분석 결과: {sentiment}")
     except Exception as e:
-        logger.error(f"✗ AI 분석 실패: {e}")
+        logger.error(f"✗ AI 분석 실패: {exc_summary(e)}")
         logger.info("  (API 키가 없는 경우 정상 - 기본값 0으로 처리)")
 
     # 테스트: KIS API (모의투자만 시도)
@@ -372,7 +373,7 @@ def quick_test():
         else:
             logger.info("⚠️  실전투자 모드는 KIS API 호출 없음")
     except Exception as e:
-        logger.error(f"✗ KIS API 테스트 실패: {e}")
+        logger.error(f"✗ KIS API 테스트 실패: {exc_summary(e)}")
 
     logger.info(f"✅ 퀵 테스트 완료 - 모든 기본 검증 성공\n")
 
@@ -449,7 +450,7 @@ def main():
             break
         except Exception as e:
             # 메인 루프가 절대 crash 되지 않도록 최상위 예외 포착
-            logger.error(f"🔥 메인 루프 오류: {e} — 30초 후 재시작", exc_info=True)
+            logger.error(f"🔥 메인 루프 오류: {exc_summary(e)} — 30초 후 재시작")
             time.sleep(30)
 
 

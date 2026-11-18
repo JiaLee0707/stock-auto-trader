@@ -24,6 +24,7 @@ from datetime import datetime
 
 import config
 import market_calendar
+from errfmt import exc_summary
 
 logger = logging.getLogger("bot")
 
@@ -278,7 +279,7 @@ def trading_days_held(position, now) -> int | None:
         try:
             entered = _dt.fromisoformat(str(raw))
         except (TypeError, ValueError) as e:
-            logger.warning(f"⚠️ entry_time 해석 실패 ({raw!r}): {e}")
+            logger.warning(f"⚠️ entry_time 해석 실패 ({raw!r}): {exc_summary(e)}")
             return None
 
     if entered.tzinfo is None:
@@ -295,7 +296,7 @@ def trading_days_held(position, now) -> int | None:
     try:
         return int(market_calendar.trading_days_between(cal_market, entered, now))
     except Exception as e:
-        logger.warning(f"⚠️ 보유 거래일 계산 실패 — 시간청산을 건너뜁니다: {e}")
+        logger.warning(f"⚠️ 보유 거래일 계산 실패 — 시간청산을 건너뜁니다: {exc_summary(e)}")
         return None
 
 

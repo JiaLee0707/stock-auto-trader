@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 import config
+from errfmt import exc_summary
 
 try:
     import exchange_calendars as xc
@@ -98,7 +99,7 @@ def extra_holidays(market: str) -> set:
             parsed.add(pd.Timestamp(item).date())
         except (TypeError, ValueError) as e:
             raise ValueError(
-                f"EXTRA_HOLIDAYS[{market!r}] 의 날짜를 해석할 수 없습니다: {item!r} ({e})"
+                f"EXTRA_HOLIDAYS[{market!r}] 의 날짜를 해석할 수 없습니다: {item!r} ({exc_summary(e)})"
             ) from e
     return parsed
 
@@ -162,7 +163,7 @@ def is_market_open(market: str, now: datetime) -> bool:
         # 캘린더 구간 밖이거나 라이브러리 오류. **모르면 열려 있다고 하지 않는다.**
         # (열려 있다고 잘못 판정하면 주문이 나가고, 닫혀 있다고 잘못 판정하면 기회를 잃는다.
         #  주문이 나가는 쪽이 더 위험하므로 False 로 둔다.)
-        logger.error(f"⚠️ [{market}] 정규장 판정 실패 — 닫힌 것으로 처리합니다: {e}")
+        logger.error(f"⚠️ [{market}] 정규장 판정 실패 — 닫힌 것으로 처리합니다: {exc_summary(e)}")
         return False
 
 
@@ -193,7 +194,7 @@ def is_order_window(market: str, now: datetime) -> bool:
         open_at = cal.session_open(session)
         close_at = cal.session_close(session)
     except Exception as e:
-        logger.error(f"⚠️ [{market}] 주문 구간 판정 실패 — 주문하지 않습니다: {e}")
+        logger.error(f"⚠️ [{market}] 주문 구간 판정 실패 — 주문하지 않습니다: {exc_summary(e)}")
         return False
 
     skip_open = timedelta(minutes=max(0, int(config.SKIP_OPEN_MINUTES)))
@@ -229,7 +230,7 @@ def next_session(market: str, now: datetime) -> datetime:
         logger.error(f"⚠️ [{market}] EXTRA_HOLIDAYS 가 연속으로 지정돼 다음 개장일을 찾지 못했습니다.")
         return None
     except Exception as e:
-        logger.error(f"⚠️ [{market}] 다음 개장 시각을 알 수 없습니다: {e}")
+        logger.error(f"⚠️ [{market}] 다음 개장 시각을 알 수 없습니다: {exc_summary(e)}")
         return None
 
 
@@ -241,7 +242,7 @@ def is_session_day(market: str, day: date) -> bool:
     try:
         return bool(cal.is_session(pd.Timestamp(day).date().isoformat()))
     except Exception as e:
-        logger.error(f"⚠️ [{market}] 거래일 판정 실패 — 거래일 아님으로 처리: {e}")
+        logger.error(f"⚠️ [{market}] 거래일 판정 실패 — 거래일 아님으로 처리: {exc_summary(e)}")
         return False
 
 
@@ -264,7 +265,7 @@ def trading_days_between(market: str, start: datetime, end: datetime) -> int:
             pd.Timestamp(start.date()), pd.Timestamp(end.date())
         )
     except Exception as e:
-        logger.error(f"⚠️ [{market}] 거래일 수 계산 실패 — 0 으로 처리합니다: {e}")
+        logger.error(f"⚠️ [{market}] 거래일 수 계산 실패 — 0 으로 처리합니다: {exc_summary(e)}")
         return 0
     # end 와 같은 날짜는 제외한다 (`end` 는 미포함이므로).
     # EXTRA_HOLIDAYS 로 추가한 휴장일도 거래일이 아니므로 빼야 한다 —

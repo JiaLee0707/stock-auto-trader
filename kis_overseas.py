@@ -19,6 +19,7 @@ import requests
 
 import config
 import market_calendar
+from errfmt import exc_summary
 
 logger = logging.getLogger("bot")
 
@@ -169,7 +170,7 @@ def request_order(method: str, url: str, tr_id: str, *, on_uncertain=None, **kwa
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
         _handle_uncertain(on_uncertain, e)
         raise OrderRequestError(
-            f"주문 요청 결과 미확정(네트워크/타임아웃) — 재시도하지 않습니다: {e}"
+            f"주문 요청 결과 미확정(네트워크/타임아웃) — 재시도하지 않습니다: {exc_summary(e)}"
         ) from e
 
     if resp.status_code == 500:
@@ -222,7 +223,7 @@ def _handle_uncertain(on_uncertain, exc) -> None:
     try:
         on_uncertain(exc)
     except Exception as e:
-        logger.error(f"주문 UNKNOWN 기록 콜백 실패 — 수동 확인이 필요합니다: {e}")
+        logger.error(f"주문 UNKNOWN 기록 콜백 실패 — 수동 확인이 필요합니다: {exc_summary(e)}")
 
 
 def _request(method: str, url: str, tr_id: str, **kwargs):
@@ -251,14 +252,14 @@ def get_current_price(ticker: str) -> float:
         resp = _request("GET", url, "HHDFS00000300", params=params)
         resp.raise_for_status()
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-        logger.warning(f"KIS API 네트워크 오류 (get_current_price): {e}")
+        logger.warning(f"KIS API 네트워크 오류 (get_current_price): {exc_summary(e)}")
         # 모의투자 모드에서는 기본값 반환
         if config.IS_MOCK:
             logger.info("모의투자 모드 - 기본값 100.00으로 반환")
             return 100.0
         raise
     except requests.exceptions.HTTPError as e:
-        logger.error(f"KIS 시세 조회 최종 실패: {e}")
+        logger.error(f"KIS 시세 조회 최종 실패: {exc_summary(e)}")
         raise
     data = resp.json()
     return float(data["output"]["last"])
@@ -377,7 +378,7 @@ def get_balance() -> dict:
             cash_dom_krw = _num(dom_output2.get("dnca_tot_amt"))
             logger.debug(f"국내잔고 원화 예수금(dnca): {cash_dom_krw:,.0f}원")
     except Exception as e:
-        logger.warning(f"원화 예수금(통합증거금) 조회 실패: {e}")
+        logger.warning(f"원화 예수금(통합증거금) 조회 실패: {exc_summary(e)}")
 
     # 통합증거금: 주문가능금 = 외화 예수금(원화환산) + 국내 원화 예수금
     # KIS 모의 서버는 frcr_dncl_amt_2를 내려주지 않는 경우가 있어, 외화가 0이면
@@ -466,7 +467,7 @@ def get_usd_krw_rate() -> float:
             raise ValueError(f"비정상 환율: {rate}")
         return rate
     except Exception as e:
-        logger.warning(f"환율 조회 실패({e}), 기본값 1350 사용")
+        logger.warning(f"환율 조회 실패({exc_summary(e)}), 기본값 1350 사용")
         return 1350.0
 
 

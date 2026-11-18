@@ -16,6 +16,7 @@ rsi(2) 처럼 짧은 기간이 필요하면 rsi(closes, 2)를 그대로 쓴다(�
 import logging
 
 import config
+from errfmt import exc_summary
 
 logger = logging.getLogger("bot")
 
@@ -202,7 +203,7 @@ def evaluate_or_none(fetch_closes) -> dict | None:
     try:
         closes = fetch_closes()
     except Exception as e:
-        raise IndicatorDataUnavailable(f"일봉 종가 조회 실패: {e}") from e
+        raise IndicatorDataUnavailable(f"일봉 종가 조회 실패: {exc_summary(e)}") from e
 
     if not closes:
         raise IndicatorDataUnavailable("일봉 종가 데이터 없음(빈 응답)")

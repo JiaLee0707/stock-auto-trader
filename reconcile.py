@@ -22,6 +22,7 @@ from datetime import datetime
 import config
 import db
 import notifier
+from errfmt import exc_summary
 
 logger = logging.getLogger("bot")
 
@@ -310,7 +311,7 @@ def halt_trading(conn, reason: str, kind: str = "STATE", *, actor: str = "bot",
         db.record_halt_event(conn, "HALT", kind=kind, reason=reason, actor=actor, details=details)
     except Exception as e:
         logger.critical(
-            f"🚨 중단 상태를 DB 에 기록하지 못했습니다 ({type(e).__name__}: {e}) — [{kind}] {reason}"
+            f"🚨 중단 상태를 DB 에 기록하지 못했습니다 ({exc_summary(e)}) — [{kind}] {reason}"
         )
         _notify("CRITICAL", "중단 기록 실패",
                 f"[{kind}] {reason}\n중단 상태를 DB 에 기록하지 못했습니다({type(e).__name__}). 직접 확인이 필요합니다.")

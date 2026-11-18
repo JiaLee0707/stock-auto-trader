@@ -225,7 +225,9 @@ def test_cancel_failure_blocks_symbol_without_fake_cancel(conn, fake_refs):
                          cancel_fn=boom)
     row = db.get_order(conn, order["id"])
     assert row["status"] == "UNKNOWN", "취소 실패인데 CANCELED 로 확정했다"
-    assert "취소 거부" in (row["raw_response"] or "")
+    # T09b-5: 예외 문구는 DB 에 남기지 않는다. 예외 타입(exc_summary)만 남는다.
+    assert "RuntimeError" in (row["raw_response"] or "")
+    assert "취소 거부" not in (row["raw_response"] or "")
 
     # 차단 확인: 같은 종목 신규 매수가 막힌다
     with pytest.raises(trader.DuplicateOrderBlocked):
