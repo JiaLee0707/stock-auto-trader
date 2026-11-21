@@ -19,7 +19,7 @@ market_calendar.py  exchange_calendars 래퍼 — 개장·휴장·주문 구간(
 kis_overseas.py   KIS 해외 API. request_read(재시도 가능)/request_order(재시도 없음), _request는 조회용 하위 호환 별칭
 kis_domestic.py   KIS 국내 API. order_body/send_order/get_order_status/get_all_holdings, cancel_order 미구현
 ai_analyzer.py    KIS 시세 + FRED VIX + RSS 뉴스 → Gemini 점수(-100~100)
-trader.py         오케스트레이션: 수집→reconcile→손실 한도 평가(_make_loss_guard)→decide()→_submit_order→_settle_order. 판단 코드는 넣지 않음
+trader.py         오케스트레이션: 수집→reconcile→손실 한도 평가(_make_loss_guard)→일봉 최신성 점검(_make_bars_guard)→decide()→_submit_order→_settle_order. 판단 코드는 넣지 않음
 main.py           1시간 스케줄러. 시작 시 DB 검증·가드(_verify_db_mode: 이 DB 를 쓴 모드와 다르면 종료), 사이클마다 reconcile→UNKNOWN 시한 점검→정규장 구간 판정→run_trading_cycle. 연속 사이클 오류 집계(_cycle_failed)
 ```
 미사용(T09b 시점): `broker.py`(어댑터 — `_run_cycle`이 받기만 하고 호출하지 않음), `trader._check_sell`(운영 호출 없음, 테스트만 부름). T12에서 통합·삭제를 결정합니다.
