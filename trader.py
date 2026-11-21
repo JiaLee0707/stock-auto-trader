@@ -49,6 +49,7 @@ import exit_rules
 import history
 import kis_domestic as kd
 import kis_overseas as kis
+import market_calendar
 import models
 import reconcile
 import risk
@@ -967,13 +968,56 @@ def _entry_signal_meta(symbol: str, bars, now: datetime) -> dict:
     return {"confirmed_bars": count, "last_confirmed_date": last_date}
 
 
+def _stale_bars_detail(last_date, now: datetime, *, calendar_market: str, max_lag: int) -> str | None:
+    """
+    확정 일봉이 **낡았는지** 판정한다 (T09b-6). 신선하면 None, 아니면 매수 보류 사유(사람이 읽는 문장).
+
+    `last_date` 는 마지막 확정 봉의 날짜(YYYY-MM-DD). 마지막 봉이 직전 거래일이면 지연 0 이다.
+    지연 = (마지막 봉 날짜부터 오늘 전날까지의 거래일 수) - 1. 주말·휴장일은 세지 않는다.
+
+    **모르면 낡은 것으로 본다.** 날짜를 읽지 못하거나, 거래일 수가 1 미만이면(마지막 봉이 거래일이 아니거나
+    `trading_days_between` 이 달력 오류로 0 을 돌려준 경우) 신선하다고 말하지 않는다.
+    `now` 가 tz 없는 시각이면 ValueError 를 올린다(호출부가 매수만 보류한다).
+    """
+    if not last_date:
+        return "확정 일봉의 마지막 날짜를 알 수 없습니다 — 매수 보류"
+    try:
+        last = datetime.fromisoformat(str(last_date)).date()
+    except ValueError:
+        return "확정 일봉의 마지막 날짜를 읽을 수 없습니다 — 매수 보류"
+    if now.tzinfo is None:
+        raise ValueError("now 는 tz 가 있는 시각이어야 합니다")
+    local_now = now.astimezone(market_calendar.market_timezone(calendar_market))
+    start = datetime(last.year, last.month, last.day, tzinfo=local_now.tzinfo)
+    sessions = market_calendar.trading_days_between(calendar_market, start, local_now)
+    if sessions < 1:
+        return (f"확정 일봉의 마지막 날짜({last.isoformat()})가 거래일이 아니거나 "
+                "거래일 수를 계산하지 못했습니다 — 매수 보류")
+    lag = sessions - 1
+    if lag > max_lag:
+        return (f"확정 일봉이 오래됐습니다 (마지막 {last.isoformat()}, 직전 거래일 이후 {lag}거래일 누락, "
+                f"허용 {max_lag}거래일) — 매수 보류")
+    return None
+
+
+def _make_bars_guard(calendar_market: str):
+    """
+    확정 일봉 최신성 점검 함수 `(마지막 봉 날짜, 현재 시각) -> 사유 | None` 를 만든다 (T09b-6).
+    허용 지연은 호출 시점의 `config.BARS_MAX_LAG_SESSIONS` 를 읽는다. 국내 사이클만 넘긴다(해외는 꺼져 있다).
+    """
+    def guard(last_date, now):
+        return _stale_bars_detail(last_date, now, calendar_market=calendar_market,
+                                  max_lag=config.BARS_MAX_LAG_SESSIONS)
+    return guard
+
+
 def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
                ai_score: int, price_fmt: str, sell_fn, buy_fn,
                fetch_closes=None, market: str | None = None,
                submit_buy=None, submit_sell=None, status_fn=None, cancel_fn=None,
                refresh_balance=None, refresh_peak=None, now: datetime | None = None,
                sizing_fn=None, fx_rate: float = 1.0, params: dict | None = None,
-               broker=None, loss_guard=None):
+               broker=None, loss_guard=None, bars_guard=None):
     """
     해외·국내 공통 매매 사이클 — **얇은 오케스트레이터** (T08).
 
@@ -1089,6 +1133,22 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
             bars_received = False
             logger.error(f"⛔ [{prefix}] 확정 일봉 조회 실패 — 이번 사이클 매수를 보류합니다: {exc_summary(e)}")
 
+    # ── 확정 일봉 최신성 (T09b-6) ─────────────────────────
+    # 낡은 일봉으로 지표를 계산하면 이미 지난 신호로 주문이 나간다. 낡았거나 최신성을 확인하지 못하면
+    # 일봉이 **없는 것으로 취급**한다 — 신규 매수만 보류하고(`decide()` 의 기존 경로) 청산은 계속된다.
+    # 낡은 봉으로는 과매수 청산 신호도 계산하지 않는다(손절·익절·시간청산은 가격·시간 규칙이라 그대로).
+    bars_stale_detail = None
+    if bars_guard is not None and bars_received and bars_meta.get("confirmed_bars"):
+        try:
+            bars_stale_detail = bars_guard(bars_meta.get("last_confirmed_date"), now)
+        except Exception as e:
+            bars_stale_detail = "확정 일봉 최신성을 확인하지 못했습니다 — 매수 보류"
+            logger.error(f"⛔ [{prefix}] 확정 일봉 최신성 확인 실패 — 이번 사이클 매수를 보류합니다: {exc_summary(e)}")
+        if bars_stale_detail:
+            logger.warning(f"⚠️ [{prefix}] {bars_stale_detail}")
+            bars_received = False
+            bars = pd.DataFrame(columns=history.COLUMNS)
+
     # ── 카운터·자본·포지션 (I/O) ──────────────────────────
     # 노출·보유 종목 수를 못 읽으면 매수하지 않는다 — 노출을 모르는 채로 사면
     # 상한을 넘길 수 있다. 청산은 계속한다.
@@ -1141,7 +1201,7 @@ def _run_cycle(prefix: str, ticker: str, balance: dict, current_price: float,
         # 조회 실패(`False`)와 캐시 없음(빈 DataFrame)을 `strategy` 가 구분할 수 있게 알린다.
         "bars_received": bars_received,
         "bars_unavailable_detail": (
-            "확정 일봉 조회 실패 — 매수 보류" if not bars_received
+            bars_stale_detail if bars_stale_detail else "확정 일봉 조회 실패 — 매수 보류" if not bars_received
             else "확정 일봉 캐시 없음 — 매수 보류"
         ),
     })
@@ -1609,4 +1669,5 @@ def run_domestic_cycle(ai_score: int):
         broker=broker_module.for_market(MARKET_DOMESTIC, ticker),
         # 손실 한도 평가 (T09b-2b-2). 해외 사이클은 넘기지 않는다 — 해외는 꺼져 있고 원화로 평가할 수 없다.
         loss_guard=_make_loss_guard(conn, ticker=ticker, market=MARKET_DOMESTIC, current_price=current_price),
+        bars_guard=_make_bars_guard(market_calendar.MARKET_KRX),
     )

@@ -50,7 +50,17 @@ def confirmed_bars(tmp_path, monkeypatch):
     today = db.now_kst().date()
 
     def _write(symbol: str, closes, volume: float = 1000.0):
-        start = today - timedelta(days=len(list(closes)))
+        # T09b-6: 마지막 봉을 **직전 KRX 거래일**로 맞춘다. 일봉 최신성 점검(`BARS_MAX_LAG_SESSIONS`)이
+        # 요일(월요일 아침의 일요일 날짜 등)에 따라 테스트를 흔들지 않게 한다.
+        import market_calendar
+        last_day = today - timedelta(days=1)
+        for _ in range(15):
+            if market_calendar.is_session_day(market_calendar.MARKET_KRX, last_day):
+                break
+            last_day -= timedelta(days=1)
+        else:
+            last_day = today - timedelta(days=1)
+        start = last_day - timedelta(days=len(list(closes)) - 1)
         rows = []
         for i, close in enumerate(closes):
             rows.append({

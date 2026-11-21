@@ -134,7 +134,8 @@ def enforce_trading_mode() -> None:
 
 def risk_config_error(*, capital_cap_krw, max_drawdown_pct, daily_loss_limit_pct,
                       halt_action, overseas_enabled,
-                      max_consecutive_errors=None, unknown_timeout_minutes=None) -> str | None:
+                      max_consecutive_errors=None, unknown_timeout_minutes=None,
+                      bars_max_lag_sessions=None) -> str | None:
     """
     손실 한도 설정이 안전하게 쓸 수 있는 값인지 확인한다 (T09b). 문제가 있으면 사유 문자열, 없으면 None.
     순수 함수 — 설정 모듈의 전역값을 읽지 않는다(테스트가 값을 직접 넘긴다).
@@ -162,6 +163,11 @@ def risk_config_error(*, capital_cap_krw, max_drawdown_pct, daily_loss_limit_pct
             0 < float(unknown_timeout_minutes) < float("inf")):
         return (f"UNKNOWN_TIMEOUT_MINUTES={unknown_timeout_minutes!r} 가 올바르지 않습니다. "
                 "0 보다 큰 유한한 숫자여야 합니다(분).")
+    if bars_max_lag_sessions is not None and not (
+            isinstance(bars_max_lag_sessions, int) and not isinstance(bars_max_lag_sessions, bool)
+            and 0 <= bars_max_lag_sessions <= 5):
+        return (f"BARS_MAX_LAG_SESSIONS={bars_max_lag_sessions!r} 가 올바르지 않습니다. "
+                "0 이상 5 이하의 정수여야 합니다(거래일 수, 끌 수 없습니다).")
     return None
 
 
@@ -173,6 +179,7 @@ def enforce_risk_config() -> None:
         overseas_enabled=IS_OVERSEAS_ENABLED,
         max_consecutive_errors=MAX_CONSECUTIVE_ERRORS,
         unknown_timeout_minutes=UNKNOWN_TIMEOUT_MINUTES,
+        bars_max_lag_sessions=BARS_MAX_LAG_SESSIONS,
     )
     if error:
         logging.getLogger("bot").critical(f"🚨 설정 오류 — 시작을 거부합니다: {error}")
@@ -372,6 +379,11 @@ GEMINI_TIMEOUT_SEC = float(os.getenv("GEMINI_TIMEOUT_SEC", "30"))
 # VERIFY: 기본값은 검증 전 가설이다.
 MAX_CONSECUTIVE_ERRORS = int(os.getenv("MAX_CONSECUTIVE_ERRORS", "5"))
 UNKNOWN_TIMEOUT_MINUTES = float(os.getenv("UNKNOWN_TIMEOUT_MINUTES", "120"))
+
+# 확정 일봉 최신성 (T09b-6). 마지막 확정 봉이 직전 거래일보다 이 거래일 수를 넘겨 오래됐으면 신규 매수만 보류한다(청산은 계속).
+# 0 = 직전 거래일 봉까지 있어야 매수한다. 0~5 만 허용하고 끌 수 없다(시작 검증).
+# VERIFY: 기본값은 검증 전 가설이다. 일봉을 채우는 경로가 아직 사람이 넣는 CSV 뿐이라 매일 갱신하지 않으면 매수가 보류된다.
+BARS_MAX_LAG_SESSIONS = int(os.getenv("BARS_MAX_LAG_SESSIONS", "0"))
 
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
 # 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)
