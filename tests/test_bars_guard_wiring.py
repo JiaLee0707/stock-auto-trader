@@ -360,3 +360,42 @@ def test_real_guard_still_sells_the_stop_loss_on_stale_bars(conn, bot, monkeypat
     submitted = _run_real_guard(conn, monkeypatch, balance=_stop_loss_balance())
     assert len(seen) == 1 and seen[0] is not None, "점검이 낡음을 판정하지 않았다 — 이 시험은 아무것도 증명하지 못한다"
     assert _sides(submitted) == ["SELL"]
+
+
+# ── 낡은 일봉은 과매수 청산에도 쓰이지 않는다 (T09b-6) ─────────
+# `OVERBOUGHT_EXIT_ENABLED`(기본 꺼짐)를 켜면 `decide()` 가 확정 일봉의 RSI·볼린저로 과매수 청산을 낸다.
+# 낡은 일봉을 그대로 두면 이미 지난 신호로 매도가 나갈 수 있어서, 낡음 판정 때 일봉을 비운다.
+# 보유 수익은 +1%(익절 3% 미만, 손절 아님)라서 과매수 규칙만 매도를 낼 수 있다.
+_OVERBOUGHT_CLOSES = [100 - i * 0.5 for i in range(29)] + [110.0]     # 완만한 하락 뒤 급등: RSI ≥ 70, 종가 ≥ 볼린저 상단
+
+
+def _seed_closes(monkeypatch, tmp_path, last_day, closes):
+    monkeypatch.setattr(history, "BARS_DIR", tmp_path / "bars")
+    start = last_day - timedelta(days=len(closes) - 1)
+    rows = [{"date": (start + timedelta(days=i)).isoformat(), "open": c, "high": c, "low": c,
+             "close": c, "volume": 1000.0} for i, c in enumerate(closes)]
+    history.save_bars(SYMBOL, rows)
+
+
+def _run_overbought(conn, monkeypatch, tmp_path, last_day):
+    _seed_closes(monkeypatch, tmp_path, last_day, _OVERBOUGHT_CLOSES)
+    _seed_open(conn)
+    monkeypatch.setattr(config, "OVERBOUGHT_EXIT_ENABLED", True)
+    decisions = _spy_decisions(monkeypatch)
+    seen = _spy_stale_detail(monkeypatch)
+    submitted = _run_real_guard(conn, monkeypatch, balance=_balance(qty=3.0, avg=100.0, profit=1.0))
+    return submitted, decisions, seen
+
+
+def test_overbought_exit_sells_on_fresh_bars(conn, bot, monkeypatch, tmp_path):
+    # 대조군: 일봉이 신선하면 이 시나리오는 과매수 규칙으로 실제 매도가 나간다
+    submitted, decisions, seen = _run_overbought(conn, monkeypatch, tmp_path, datetime(2026, 11, 20).date())
+    assert seen == [None]
+    assert _sides(submitted) == ["SELL"]
+    assert "과매수" in decisions[0].meta["detail"]
+
+
+def test_overbought_exit_is_not_driven_by_stale_bars(conn, bot, monkeypatch, tmp_path):
+    submitted, decisions, seen = _run_overbought(conn, monkeypatch, tmp_path, datetime(2026, 11, 19).date())
+    assert len(seen) == 1 and seen[0] is not None, "점검이 낡음을 판정하지 않았다 — 이 시험은 아무것도 증명하지 못한다"
+    assert submitted == []
