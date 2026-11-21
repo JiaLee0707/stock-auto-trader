@@ -385,6 +385,11 @@ UNKNOWN_TIMEOUT_MINUTES = float(os.getenv("UNKNOWN_TIMEOUT_MINUTES", "120"))
 # VERIFY: 기본값은 검증 전 가설이다. 일봉을 채우는 경로가 아직 사람이 넣는 CSV 뿐이라 매일 갱신하지 않으면 매수가 보류된다.
 BARS_MAX_LAG_SESSIONS = int(os.getenv("BARS_MAX_LAG_SESSIONS", "0"))
 
+# 모의 수동 주문 확인 도구 (T09c). 환경변수로 바꿀 수 없는 안전 상한이다(일부러 getenv 를 쓰지 않는다).
+MANUAL_ORDER_MAX_QTY = 1
+# 미리보기 뒤 확인 문장을 입력할 수 있는 시간(초). 이보다 늦으면 시세가 낡았다고 보고 보내지 않는다.
+MANUAL_ORDER_CONFIRM_TIMEOUT_SEC = 90
+
 # ── 스노우볼 전략 (균형 프로필) ──────────────────────────
 # 매수: 종목당 하루 MAX_BUYS_PER_DAY회까지 분할 매수 (모든 회차 평단 대비 DIP_THRESHOLD 기준)
 MAX_BUYS_PER_DAY       = int(os.getenv("MAX_BUYS_PER_DAY", "2"))
