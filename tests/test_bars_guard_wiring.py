@@ -280,3 +280,83 @@ def test_only_run_domestic_cycle_passes_a_bars_guard():
                         and any(kw.arg == "bars_guard" for kw in node.keywords)):
                     names.append(fn.name)
     assert names == ["run_domestic_cycle"]
+
+
+# ── 실제 점검 함수로 끝까지 (T09b-6) ─────────────────────
+# 위 시험은 점검 함수 대역을 쓴다. 여기서는 `_make_bars_guard` 가 만든 **실제** 점검 함수를 `_run_cycle` 에 넣고
+# 디스크의 일봉 CSV → `_entry_signal_meta` 의 마지막 날짜 → 판정까지 이어서 확인한다.
+# 시계는 고정한다(2026-11-23 월요일 10시 — 직전 거래일은 11-20 금요일, 11-21·22 는 주말).
+from datetime import timedelta  # noqa: E402
+
+_MON = datetime(2026, 11, 23, 10, 0, tzinfo=KST)
+
+
+def _seed_bars(monkeypatch, tmp_path, last_day):
+    """마지막 봉이 `last_day` 인 매수 신호 일봉 CSV 를 임시 캐시에 만든다."""
+    monkeypatch.setattr(history, "BARS_DIR", tmp_path / "bars")
+    start = last_day - timedelta(days=len(_BUY_CLOSES) - 1)
+    rows = [{"date": (start + timedelta(days=i)).isoformat(), "open": c, "high": c, "low": c,
+             "close": c, "volume": 1000.0} for i, c in enumerate(_BUY_CLOSES)]
+    history.save_bars(SYMBOL, rows)
+
+
+def _spy_stale_detail(monkeypatch):
+    """실제 판정 함수를 그대로 부르되 돌려준 값을 기록한다(점검이 실제로 실행됐는지 확인용)."""
+    real = trader._stale_bars_detail
+    seen = []
+
+    def spy(*args, **kwargs):
+        seen.append(real(*args, **kwargs))
+        return seen[-1]
+
+    monkeypatch.setattr(trader, "_stale_bars_detail", spy)
+    return seen
+
+
+def _run_real_guard(conn, monkeypatch, *, balance):
+    """`_make_bars_guard` 가 만든 실제 점검 함수로 1사이클을 돈다. 나간 주문 [(방향, 수량), ...] 을 돌려준다."""
+    monkeypatch.setattr(trader, "_state_conn", lambda: conn)
+    monkeypatch.setattr(config, "USE_INDICATORS", True)
+    monkeypatch.setattr(config, "BARS_MAX_LAG_SESSIONS", 0)
+    submitted = []
+    trader._run_cycle(
+        "국내", SYMBOL, balance, 23_220.0, 0, lambda p: f"{p:,.0f}원",
+        sell_fn=None, buy_fn=None, market=MARKET,
+        submit_buy=lambda qty, p: submitted.append(("BUY", qty)),
+        submit_sell=lambda reason, qty: submitted.append(("SELL", qty)),
+        status_fn=None, cancel_fn=None,
+        params={"capital_cap_krw": 0},
+        now=_MON,
+        bars_guard=trader._make_bars_guard(market_calendar.MARKET_KRX),
+    )
+    return submitted
+
+
+def test_real_guard_lets_the_buy_through_when_the_last_bar_is_the_previous_session(conn, bot, monkeypatch, tmp_path):
+    _seed_bars(monkeypatch, tmp_path, datetime(2026, 11, 20).date())      # 금요일 봉, 월요일 오전
+    seen = _spy_stale_detail(monkeypatch)
+    assert _sides(_run_real_guard(conn, monkeypatch, balance=_balance())) == ["BUY"]
+    assert seen == [None]
+
+
+def test_real_guard_holds_the_buy_when_a_session_is_missing(conn, bot, monkeypatch, tmp_path, caplog):
+    _seed_bars(monkeypatch, tmp_path, datetime(2026, 11, 19).date())      # 목요일 봉 — 금요일 봉이 없다
+    decisions = _spy_decisions(monkeypatch)
+    seen = _spy_stale_detail(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        submitted = _run_real_guard(conn, monkeypatch, balance=_balance())
+    assert submitted == []
+    assert len(seen) == 1 and seen[0] is not None
+    assert decisions[0].reason == models.HOLD_INDICATOR_UNAVAILABLE
+    assert "2026-11-19" in decisions[0].meta["detail"]
+    assert "1거래일 누락" in decisions[0].meta["detail"]
+    assert "오래됐습니다" in caplog.text
+
+
+def test_real_guard_still_sells_the_stop_loss_on_stale_bars(conn, bot, monkeypatch, tmp_path):
+    _seed_bars(monkeypatch, tmp_path, datetime(2026, 11, 19).date())
+    _seed_open(conn)
+    seen = _spy_stale_detail(monkeypatch)
+    submitted = _run_real_guard(conn, monkeypatch, balance=_stop_loss_balance())
+    assert len(seen) == 1 and seen[0] is not None, "점검이 낡음을 판정하지 않았다 — 이 시험은 아무것도 증명하지 못한다"
+    assert _sides(submitted) == ["SELL"]
