@@ -153,6 +153,19 @@ grep "현재 모드" logs/bot.log | tail -1    # 예: 🔒 현재 모드: 모의
 어떤 API 호출보다 먼저 종료합니다. 또한 주문 함수(`buy_shares`·`sell_all`·`buy_domestic`·`sell_domestic_all`·`send_order`·`cancel_order`)가 각자 시작 시 같은 검사를 하고 `_submit_order`도 `orders` 기록 전에 같은 검사를 하므로,
 `main()`을 거치지 않고 직접 호출돼도 주문이 나가지 않습니다.
 
+## 모의 수동 주문 확인 (T09c)
+
+봇은 매수 신호가 나야만 주문을 내기 때문에, 신 TR_ID·지정가를 모의 서버가 받는지 확인할 주문이 없을 수 있습니다. 이 도구는 신호와 상관없이 **사람이 직접** 1주짜리 시험 주문을 냅니다. 모의투자에서만 동작하고, 기본은 미리보기라서 아무것도 보내지 않습니다. 저장소 루트에서 실행하고, 절차와 확인 항목은 [docs/manual_checks.md](docs/manual_checks.md) 5절에 있습니다.
+
+```bash
+.venv/bin/python -m manual_order buy              # 미리보기(아무것도 보내지 않음)
+.venv/bin/python -m manual_order buy --send       # 화면의 확인 문장을 그대로 입력하면 1주 지정가 매수를 낸다
+.venv/bin/python -m manual_order sell [--send]    # 봇이 산 포지션이 있을 때만
+.venv/bin/python -m manual_order settle           # 체결 결과를 DB 에 반영한다(주문은 내지 않는다)
+```
+
+종목은 `DOMESTIC_TICKER`, 수량은 1주(`MANUAL_ORDER_MAX_QTY`, 환경변수로 바꿀 수 없음), 주문은 지정가입니다. 전송은 봇과 같은 `_submit_order`(킬스위치 포함) 한 곳으로만 나가고, 주문 구간이 아니면 거부합니다. 국내 취소가 구현돼 있지 않아 체결되지 않은 주문은 KIS 모의 앱에서 직접 취소해야 합니다. 봇(`main.py`)이 실행 중일 때는 쓰지 마세요.
+
 ## 매매 중단과 재개 (T03·T09a)
 
 봇은 상태를 믿을 수 없을 때 스스로 멈춥니다. 멈춘 이유에 따라 막히는 범위가 다릅니다.
