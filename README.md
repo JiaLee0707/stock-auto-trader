@@ -249,7 +249,7 @@ grep "미충족" logs/bot.log | tail -20        # 매수/매도 조건 미충족
 | 체결조회 TR_ID (국내) | `VTTC0081R` | `TTTC0081R` |
 | 정정취소 TR_ID (국내) | `VTTC0013U` | `TTTC0013U` |
 
-국내 TR_ID는 T04b(`docs/kis_api_fields.md` §1~§3)에서 신TR로 교체했습니다.
+국내 TR_ID는 T04b(`docs/kis_api_fields.md` §1~§3)에서 신TR로 교체했습니다. 모의 서버가 국내 지정가 매수·매도(`VTTC0012U`·`VTTC0011U`) 주문을 받아 체결하는 것은 2026-11-23 수동 주문 도구로 1주씩 확인했습니다(`docs/manual_checks.md` 5절). 시장가(`01`)와 주문 취소는 확인하지 못했습니다.
 구TR(`VTTC0802U`/`TTTC0802U`, `VTTC0801U`/`TTTC0801U`, `VTTC0803U`/`TTTC0803U`)은
 공식 문서가 "사전 고지 없이 막힐 수 있음"이라고 명시해 사용하지 않습니다.
 해외 TR_ID는 `docs/kis_api_fields.md`에 해외 주문 API가 없어 **확인 필요**(`# VERIFY`)입니다.
