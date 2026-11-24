@@ -148,7 +148,7 @@ grep -E "결과 미확정|재시도하지 않습니다|UNKNOWN" logs/bot.log
 | 주문체결조회(3개월 이내) | `VTTC0081R` | `_TR_CCLD` |
 | 정정취소 | `VTTC0013U` | `_TR_RVSECNCL` (취소 미구현) |
 
-주문구분(`ORD_DVSN`)은 문서에서 `00` 이 지정가, `01` 이 시장가입니다. 이 봇의 주문은 지정가(`00`)여야 합니다.
+주문구분(`ORD_DVSN`)은 문서에서 `00` 이 지정가, `01` 이 시장가입니다. 수동 주문 도구의 기본은 지정가(`00`)이고, 매도에 `--market` 을 줄 때만 시장가(`01`, `ORD_UNPR="0"`)입니다. 봇의 손절·시간청산 기본 유형은 시장가이므로 아래 "시장가 매도 확인"에서 따로 확인합니다.
 잔고조회(`_TR_BALANCE`)와 매수가능조회(`_TR_PSBL_ORDER`)의 TR_ID 는 `kis_api_fields.md` 에 없습니다(문서 근거 없음). 2절 확인이 그 첫 증거입니다.
 모의 서버의 체결 정책(즉시 체결 여부, 시간 제한)도 문서에 없으니 관찰한 대로 기록하세요.
 
@@ -198,9 +198,49 @@ grep -E "결과 미확정|재시도하지 않습니다|UNKNOWN" logs/bot.log
 | 앱 주문유형 표시 | 보통가 | 보통가 |
 
 - 신 TR_ID로 `ORD_DVSN=00` 주문을 모의 서버가 받아 체결했고, 체결 조회·잔고 조회도 실제 응답으로 동작했습니다(예수금·보유 수량이 앱과 일치). 앱의 '보통가'를 지정가로 읽은 것은 해석입니다(국내 증권 앱에서 보통가는 지정가를 뜻하는 것으로 알고 있으나 KIS 문서로 확인하지 못했습니다).
-- **시장가(`01`)는 확인하지 못했습니다.** 봇의 손절·시간청산 등 기본 청산 주문 유형이 시장가인데 이 도구는 지정가만 냅니다. 실전 전환 전에 확인해야 합니다.
+- **시장가(`01`)는 확인하지 못했습니다.** 봇의 손절·시간청산 등 기본 청산 주문 유형이 시장가인데 당시 이 도구는 지정가만 냈습니다(T09d 에서 `sell --market` 을 추가했고, 시장가 확인은 아직 하지 않았습니다). 실전 전환 전에 확인해야 합니다.
 - 두 주문 모두 주문 직후 2~3초 안에 주문 단가로 체결됐습니다(표본 2건이라 모의 서버의 체결 정책으로 일반화하지 않습니다). 체결되지 않은 주문의 취소와 앱 취소 후 DB 반영은 관찰하지 못했습니다.
 - 시험 뒤 앱은 보유 없음(평가금액 0원), 예수금 10,000,000원, D+2예수금 10,000,050원이었고 DB는 포지션 CLOSED 0주, 실현손익 +50원이었습니다. 이 왕복에서 모의는 수수료·세금을 0원으로 처리한 것으로 보이며 실전과 같다고 일반화하지 마세요.
+
+**시장가 매도 확인 (T09d — 절차만 있고 아직 하지 않았습니다)**
+
+봇의 손절·시간청산·트레일링·과매수 청산 기본 주문 유형은 시장가(`ORD_DVSN=01`, `ORD_UNPR=0`)입니다. 모의 서버가 이를 받는지, 체결 평균가(`avg_prvs`)를 돌려주는지는 관찰한 적이 없습니다. 지정가는 평균가가 안 와도 주문 단가로 대체돼 같은 값이 나오므로 11/23 시험으로는 알 수 없습니다. 시장가 매도에서 평균가가 안 오면 `realized_pnl` 이 NULL(`note=sell_price_unknown`)로 남고, 그러면 손실 한도 계산에서 빠져 봇을 켰을 때 "손익 미확인" 중단(RISK, 신규 매수만 차단)이 걸릴 수 있습니다(손실 한도 설계에 따른 추론이고 관찰은 아닙니다).
+
+수동 주문 도구의 `sell --market` 은 봇의 손절과 같은 모양(`price=0.0`, 유형 `MARKET`)의 주문을 `_submit_order` 한 곳으로 냅니다. 시장가는 매도에서만 쓸 수 있고(매수에 붙이면 거부), 확인 문장 `MOCK SELL <종목코드> 1 MARKET` 을 직접 입력해야 나갑니다. 지정가 확인 문장으로는 시장가 주문이 나가지 않고, 반대도 마찬가지입니다.
+
+순서 (저장소 루트에서, 평일 정규장 주문 구간에서만, 봇(`main.py`)을 끈 상태로):
+
+```bash
+date                                                    # 주문 구간 시간인지 직접 확인(시각을 짐작하지 않는다)
+.venv/bin/python -m risk status                         # 게이트 OPEN, 미확정 주문 0건
+.venv/bin/python -m manual_order buy --send             # 1) 지정가 1주 매수(미리보기를 먼저 확인). 체결되면 봇이 관리하는 포지션이 생긴다
+.venv/bin/python -m manual_order settle                 #    체결을 DB 에 반영
+.venv/bin/python -m manual_order sell --market          # 2) 시장가 매도 미리보기. 아무것도 보내지 않는다
+.venv/bin/python -m manual_order sell --market --send   # 3) 확인 문장을 직접 입력해야 나간다
+.venv/bin/python -m manual_order settle                 # 4) 체결을 DB 에 반영
+```
+
+시험 직후, **봇을 켜기 전에** DB 를 읽기 전용으로 봅니다(`raw_request`·`raw_response` 에는 계좌번호가 들어 있을 수 있어 조회하지 않습니다).
+
+```bash
+.venv/bin/python - <<'EOF'
+import sqlite3
+c = sqlite3.connect("file:data/bot.db?mode=ro", uri=True)
+for row in c.execute("SELECT id, side, qty, price, order_type, status, filled_qty, avg_fill_price, reason FROM orders ORDER BY id DESC LIMIT 5"):
+    print(row)
+for row in c.execute("SELECT order_id, qty, sell_price, avg_cost, pnl, note FROM realized_pnl ORDER BY order_id DESC LIMIT 5"):
+    print(row)
+EOF
+.venv/bin/python -m risk status
+```
+
+- [ ] 모의 서버가 시장가(`ORD_DVSN=01`) 매도 주문을 접수했다 (도구가 접수 응답 뒤 "주문 기록 #N" 을 출력했다)
+- [ ] KIS 앱에 시장가로 보인다 (앱의 주문유형 표시를 그대로 기록)
+- [ ] 체결 평균가가 `orders.avg_fill_price` 에 채워졌다
+- [ ] `realized_pnl.pnl` 이 NULL 이 아니다 (NULL 이면 `note` 를 기록)
+- [ ] 시험 뒤 DB 포지션 CLOSED, 미확정 주문 0건, 앱 보유 없음
+
+평균가가 오지 않으면 값을 만들어 넣거나 NULL 을 숨기지 말고, 위 출력과 `risk status` 결과를 그대로 기록한 뒤 봇을 켜기 전에 다음 단계를 정합니다.
 
 거절되거나 어긋나면 TR_ID·구분 코드를 추측으로 바꾸지 말고, `docs/kis_api_fields.md` 와 대조한 뒤 보고하세요.
 

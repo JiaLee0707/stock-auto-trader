@@ -161,10 +161,11 @@ grep "현재 모드" logs/bot.log | tail -1    # 예: 🔒 현재 모드: 모의
 .venv/bin/python -m manual_order buy              # 미리보기(아무것도 보내지 않음)
 .venv/bin/python -m manual_order buy --send       # 화면의 확인 문장을 그대로 입력하면 1주 지정가 매수를 낸다
 .venv/bin/python -m manual_order sell [--send]    # 봇이 산 포지션이 있을 때만
+.venv/bin/python -m manual_order sell --market [--send]   # 시장가 매도 시험(매도 전용). 확인 문장이 따로 있다
 .venv/bin/python -m manual_order settle           # 체결 결과를 DB 에 반영한다(주문은 내지 않는다)
 ```
 
-종목은 `DOMESTIC_TICKER`, 수량은 1주(`MANUAL_ORDER_MAX_QTY`, 환경변수로 바꿀 수 없음), 주문은 지정가입니다. 전송은 봇과 같은 `_submit_order`(킬스위치 포함) 한 곳으로만 나가고, 주문 구간이 아니면 거부합니다. 국내 취소가 구현돼 있지 않아 체결되지 않은 주문은 KIS 모의 앱에서 직접 취소해야 합니다. 봇(`main.py`)이 실행 중일 때는 쓰지 마세요.
+종목은 `DOMESTIC_TICKER`, 수량은 1주(`MANUAL_ORDER_MAX_QTY`, 환경변수로 바꿀 수 없음), 주문은 지정가이고, 매도에 `--market` 을 붙일 때만 시장가(`ORD_DVSN=01`, 가격 지정 없음)입니다. 시장가는 `MOCK SELL <종목코드> 1 MARKET` 문장을 직접 입력해야 나가고(지정가 문장으로는 나가지 않습니다), 매수에 `--market` 을 붙이면 DB·API 에 닿기 전에 거부합니다(종료 코드 1). 시장가 시험의 절차는 `docs/manual_checks.md` 5절에 있고, 서버에서 확인한 결과는 아직 없습니다. 전송은 봇과 같은 `_submit_order`(킬스위치 포함) 한 곳으로만 나가고, 주문 구간이 아니면 거부합니다. 국내 취소가 구현돼 있지 않아 체결되지 않은 주문은 KIS 모의 앱에서 직접 취소해야 합니다. 봇(`main.py`)이 실행 중일 때는 쓰지 마세요.
 
 ## 매매 중단과 재개 (T03·T09a)
 
