@@ -572,3 +572,183 @@ def test_a_bad_body_is_refused_before_any_send(env, monkeypatch, capsys):
     assert env.sent == []
     assert _open_orders(env.conn) == []
     assert "본문 검증 실패" in _all_output(capsys)
+
+
+# ── 시장가 매도 (T09d) ───────────────────────────────────
+# 봇의 손절·시간청산은 시장가로 나간다. `sell --market` 은 모의 서버가 그 주문을 받는지, 체결 평균가를 돌려주는지 확인하려는 것이다.
+# 시장가는 매도에서만, `--market` 을 준 때만, 전용 확인 문장(MARKET)을 입력한 때만 나간다. 여기서도 네트워크는 쓰지 않는다.
+
+def _market_phrase():
+    return f"MOCK SELL {SYMBOL} 1 MARKET"
+
+
+def _hold_one(env):
+    db.upsert_position(env.conn, SYMBOL, MARKET, qty=1.0, avg_price=23_000.0, status="OPEN")
+    env.holding["qty"] = 1.0
+
+
+def _rows(conn, sql):
+    # 연결의 row 형식이 무엇이든 값만 튜플로 돌려준다
+    out = []
+    for row in conn.execute(sql).fetchall():
+        out.append(tuple(row.values()) if isinstance(row, dict) else tuple(row))
+    return out
+
+
+def test_market_confirm_phrase_has_no_price():
+    assert manual_order.confirm_phrase("SELL", "379800", 1, "0", market=True) == "MOCK SELL 379800 1 MARKET"
+    assert manual_order.confirm_phrase("SELL", "379800", 1, "21400", market=True) == "MOCK SELL 379800 1 MARKET"
+    assert manual_order.confirm_phrase("SELL", "379800", 1, "21400") == "MOCK SELL 379800 1 @ 21400"
+
+
+def test_body_error_market_mode_accepts_only_the_market_body(monkeypatch):
+    monkeypatch.setattr(kd, "_account", lambda: (FAKE_ACCOUNT, "77"))
+    market_body = kd.order_body(SYMBOL, 1, 23_220.0, side="SELL", order_type="market")
+    limit_body = kd.order_body(SYMBOL, 1, 23_220.0, side="SELL", order_type="limit")
+    assert market_body["ORD_DVSN"] == "01" and market_body["ORD_UNPR"] == "0"
+    assert manual_order.body_error(market_body, SYMBOL, 1, market=True) is None
+    assert "시장가" in manual_order.body_error(limit_body, SYMBOL, 1, market=True)
+    assert "시장가" in manual_order.body_error(dict(market_body, ORD_DVSN="00"), SYMBOL, 1, market=True)
+    assert "단가" in manual_order.body_error(dict(market_body, ORD_UNPR="23220"), SYMBOL, 1, market=True)
+    assert "종목" in manual_order.body_error(dict(market_body, PDNO="005930"), SYMBOL, 1, market=True)
+    assert "수량" in manual_order.body_error(dict(market_body, ORD_QTY="2"), SYMBOL, 1, market=True)
+    assert "지정가" in manual_order.body_error(market_body, SYMBOL, 1)
+
+
+def test_refusal_reasons_allow_market_only_for_a_sell():
+    assert "시장가" in _joined(manual_order.refusal_reasons(**_buy(market=True)))
+    assert manual_order.refusal_reasons(**_sell(market=True)) == []
+
+
+def test_market_buy_is_refused_before_touching_the_db_or_the_api(monkeypatch, capsys):
+    monkeypatch.setattr(config, "IS_MOCK", True)
+    touched = []
+
+    def boom(*args, **kwargs):
+        touched.append(1)
+        raise AssertionError("시장가 매수는 DB·API 에 닿기 전에 거부돼야 한다")
+
+    for obj, name in ((db, "open_db"), (kd, "get_domestic_price"), (kd, "get_domestic_balance"),
+                      (trader, "_submit_order")):
+        monkeypatch.setattr(obj, name, boom)
+    for argv in (["buy", "--market"], ["buy", "--market", "--send"]):
+        assert manual_order.main(argv) == 1
+    out = _all_output(capsys)
+    assert touched == []
+    assert out.count("sell 에서만") == 2
+
+
+def test_run_itself_refuses_a_market_buy(env, monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise AssertionError("시장가 매수가 주문 경로까지 갔다")
+
+    monkeypatch.setattr(trader, "_submit_order", boom)
+    rc = manual_order._run(SimpleNamespace(command="buy", send=True, market=True), env.conn)
+    out = _all_output(capsys)
+    assert rc == 1
+    assert env.sent == []
+    assert "시장가는 매도" in out
+
+
+def test_market_dry_run_shows_a_market_order_and_sends_nothing(env, monkeypatch, capsys):
+    _hold_one(env)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("미리보기가 주문 경로를 불렀다")
+
+    monkeypatch.setattr(trader, "_submit_order", boom)
+    rc = manual_order.main(["sell", "--market"], conn=env.conn)
+    out = _all_output(capsys)
+    assert rc == 0
+    assert env.sent == []
+    assert _open_orders(env.conn) == []
+    assert "시장가" in out and "지정가" not in out
+    assert "ORD_DVSN=01" in out and "ORD_UNPR=0" in out
+    assert "VTTC0011U" in out
+    assert "sell --market --send" in out
+    assert FAKE_ACCOUNT not in out
+
+
+def test_limit_preview_is_unchanged_without_the_flag(env, capsys):
+    _hold_one(env)
+    rc = manual_order.main(["sell"], conn=env.conn)
+    out = _all_output(capsys)
+    assert rc == 0
+    assert "지정가" in out and "ORD_DVSN=00" in out
+    assert "시장가" not in out and "--market" not in out
+
+
+def test_confirmed_market_sell_sends_one_market_order_and_records_the_fill(env, monkeypatch, capsys):
+    _hold_one(env)
+    env.statuses["value"] = _filled(price=23_200.0)
+    _type(monkeypatch, _market_phrase())
+    rc = manual_order.main(["sell", "--market", "--send"], conn=env.conn)
+    out = _all_output(capsys)
+    assert rc == 0
+    assert len(env.sent) == 1
+    side, body = env.sent[0]
+    assert side == "SELL" and body["PDNO"] == SYMBOL and body["ORD_QTY"] == "1"
+    assert body["ORD_DVSN"] == "01" and body["ORD_UNPR"] == "0"
+    assert _rows(env.conn, "SELECT price, order_type, status, avg_fill_price, reason FROM orders") == [
+        (0.0, "MARKET", "FILLED", 23_200.0, "MANUAL_CHECK")]
+    assert _rows(env.conn, "SELECT sell_price, avg_cost, pnl, note FROM realized_pnl") == [
+        (23_200.0, 23_000.0, 200.0, None)]
+    position = db.get_position(env.conn, SYMBOL, MARKET)
+    assert position is None or float(position.get("qty") or 0.0) == 0.0
+    assert "시장가로 보임" in out and "지정가로 보임" not in out
+    assert FAKE_ACCOUNT not in out
+
+
+def test_market_sell_without_an_average_price_records_unknown_pnl_not_a_guess(env, monkeypatch):
+    _hold_one(env)
+    env.statuses["value"] = SimpleNamespace(status="FILLED", filled_qty=1.0, avg_fill_price=None, raw={})
+    _type(monkeypatch, _market_phrase())
+    rc = manual_order.main(["sell", "--market", "--send"], conn=env.conn)
+    assert rc == 0
+    assert _rows(env.conn, "SELECT price, status, avg_fill_price FROM orders") == [(0.0, "FILLED", None)]
+    assert _rows(env.conn, "SELECT sell_price, avg_cost, pnl, note FROM realized_pnl") == [
+        (0.0, 23_000.0, None, "sell_price_unknown")]
+
+
+def test_a_limit_phrase_does_not_confirm_a_market_sell(env, monkeypatch, capsys):
+    _hold_one(env)
+    _type(monkeypatch, _phrase("SELL"))
+    rc = manual_order.main(["sell", "--market", "--send"], conn=env.conn)
+    assert rc == 1
+    assert env.sent == []
+    assert _open_orders(env.conn) == []
+    assert "일치하지 않습니다" in _all_output(capsys)
+
+
+def test_a_market_phrase_does_not_confirm_a_limit_sell(env, monkeypatch, capsys):
+    _hold_one(env)
+    _type(monkeypatch, _market_phrase())
+    rc = manual_order.main(["sell", "--send"], conn=env.conn)
+    assert rc == 1
+    assert env.sent == []
+    assert _open_orders(env.conn) == []
+    assert "일치하지 않습니다" in _all_output(capsys)
+
+
+def test_market_sell_is_refused_without_a_bot_position(env, monkeypatch, capsys):
+    env.holding["qty"] = 1.0
+    _type(monkeypatch, _market_phrase())
+    rc = manual_order.main(["sell", "--market", "--send"], conn=env.conn)
+    assert rc == 1
+    assert env.sent == []
+    assert _open_orders(env.conn) == []
+
+
+def test_market_sell_still_goes_through_the_kill_switch(env, monkeypatch, capsys):
+    _hold_one(env)
+
+    def halted(conn, side, reason=None):
+        raise risk.TradingHalted("시험")
+
+    monkeypatch.setattr(risk, "assert_order_permitted", halted)
+    _type(monkeypatch, _market_phrase())
+    rc = manual_order.main(["sell", "--market", "--send"], conn=env.conn)
+    assert rc == 1
+    assert env.sent == []
+    assert _open_orders(env.conn) == []
+    assert "킬스위치" in _all_output(capsys)

@@ -10,11 +10,11 @@
   - 새 주문 경로를 만들지 않는다. 전송은 `trader._submit_order` 한 곳으로만 하고(실전 가드 → 킬스위치 →
     중복 확인 → SUBMITTED 선기록 → 전송), 이 모듈은 전송 함수를 그 인자로만 넘긴다.
   - 기본은 미리보기다. 보내려면 `--send` 를 붙이고 화면에 보인 확인 문장을 직접 입력해야 한다.
-  - 종목은 `config.DOMESTIC_TICKER`(국내), 지정가, `config.MANUAL_ORDER_MAX_QTY`(1주) 이하만.
+  - 종목은 `config.DOMESTIC_TICKER`(국내), `config.MANUAL_ORDER_MAX_QTY`(1주) 이하만. 주문은 지정가이고, 시장가는 `sell --market` 에서만 쓴다.
   - 재시도하지 않는다. 결과가 불확실하면(UNKNOWN) 다시 보내지 말고 KIS 모의 앱에서 확인한다.
   - 요청 본문(계좌번호 포함)과 응답 원문은 출력하지 않는다.
 
-사용: python -m manual_order buy|sell [--send]   /   python -m manual_order settle
+사용: python -m manual_order buy [--send]|sell [--market] [--send]   /   python -m manual_order settle
 종료 코드: 0 정상, 1 거부·실패(주문을 보내지 않음), 2 주문을 보냈으나 확정하지 못했거나 보냈는지 불확실
 """
 import argparse
@@ -71,8 +71,10 @@ def _masked(value) -> str:
     return config.mask(value, keep=4) if value else "없음"
 
 
-def confirm_phrase(side: str, symbol: str, qty: int, limit_price: str) -> str:
-    """사람이 그대로 입력해야 하는 확인 문장. 방향·종목·수량·주문 단가가 모두 들어 있다."""
+def confirm_phrase(side: str, symbol: str, qty: int, limit_price: str, *, market: bool = False) -> str:
+    """사람이 그대로 입력해야 하는 확인 문장. 방향·종목·수량·주문 단가(시장가는 MARKET)가 모두 들어 있다."""
+    if market:
+        return f"MOCK {side} {symbol} {qty} MARKET"
     return f"MOCK {side} {symbol} {qty} @ {limit_price}"
 
 
@@ -90,7 +92,7 @@ def _gate_refusal(gate, detail, side):
 
 
 def refusal_reasons(*, side, qty, is_mock, db_mode_error, in_order_window, gate, gate_detail,
-                    price, position, broker_qty, cash_krw, open_orders) -> list:
+                    price, position, broker_qty, cash_krw, open_orders, market=False) -> list:
     """
     주문을 보내면 안 되는 이유 목록(순수 함수). 빈 목록이어야 진행한다.
     모든 입력은 호출부가 읽어 온 값이다 — 모르는 값(None·NaN)은 거부 사유다(모르면 주문하지 않는다).
@@ -102,6 +104,8 @@ def refusal_reasons(*, side, qty, is_mock, db_mode_error, in_order_window, gate,
         reasons.append(f"DB 모드 확인이 거부됐습니다: {db_mode_error}")
     if side not in ("BUY", "SELL"):
         reasons.append("방향은 BUY 또는 SELL 이어야 합니다")
+    if market and side != "SELL":
+        reasons.append("시장가는 매도(sell --market)에서만 쓸 수 있습니다")
     cap = config.MANUAL_ORDER_MAX_QTY
     q = qty if (isinstance(qty, int) and not isinstance(qty, bool)) else None
     if q is None or not 1 <= q <= cap:
@@ -142,14 +146,20 @@ def refusal_reasons(*, side, qty, is_mock, db_mode_error, in_order_window, gate,
     return reasons
 
 
-def body_error(body, symbol: str, qty: int):
-    """전송할 주문 본문이 의도한 것(해당 종목, 수량, 지정가, 양의 단가)인지 확인한다. 문제가 있으면 사유, 없으면 None."""
+def body_error(body, symbol: str, qty: int, *, market: bool = False):
+    """전송할 주문 본문이 의도한 것(해당 종목, 수량, 지정가와 양의 단가. market=True 면 시장가와 단가 0)인지 확인한다. 문제가 있으면 사유, 없으면 None."""
     if not isinstance(body, dict):
         return "주문 본문이 올바르지 않습니다"
     if body.get("PDNO") != symbol:
         return "종목 코드가 다릅니다"
     if body.get("ORD_QTY") != str(qty):
         return "수량이 다릅니다"
+    if market:
+        if body.get("ORD_DVSN") != kd._DVSN_MARKET:
+            return "시장가 주문구분이 아닙니다"
+        if str(body.get("ORD_UNPR", "")) != "0":
+            return "시장가의 주문 단가는 0 이어야 합니다"
+        return None
     if body.get("ORD_DVSN") != kd._DVSN_LIMIT:
         return "지정가 주문구분이 아닙니다"
     unpr = str(body.get("ORD_UNPR", ""))
@@ -177,13 +187,17 @@ def _print_refusal(reasons) -> None:
 
 
 def _print_preview(*, side, symbol, qty, price, limit_price, ord_dvsn, tr_id, in_window, gate,
-                   open_count, cash, broker_qty, position) -> None:
+                   open_count, cash, broker_qty, position, market=False) -> None:
     host = urlsplit(config.KIS_BASE_URL).hostname or "(unknown)"
     label = "매수(BUY)" if side == "BUY" else "매도(SELL)"
     print("=== 모의투자 수동 주문 미리보기 ===")
     print(f"모드: 모의 | 서버: {host}")
     print(f"방향: {label} | 종목: {symbol} | 수량: {qty}주")
-    print(f"현재가: {_won(price)} → 주문 단가: {int(limit_price):,}원 (지정가, ORD_DVSN={ord_dvsn})")
+    if market:
+        print(f"현재가: {_won(price)} → 시장가 주문 (가격 지정 없음, ORD_DVSN={ord_dvsn}, ORD_UNPR={limit_price})")
+        print("주의: 체결가는 현재가와 다를 수 있습니다. 서버가 체결 평균가를 돌려주는지가 이 시험의 확인 대상입니다.")
+    else:
+        print(f"현재가: {_won(price)} → 주문 단가: {int(limit_price):,}원 (지정가, ORD_DVSN={ord_dvsn})")
     print(f"TR_ID: {tr_id}")
     print(f"주문 구간: {'가능' if in_window else '아님'} | 중단 상태: {gate} | 미확정 주문: {open_count}건")
     pos_text = "없음" if position is None else f"{position.get('status')} {position.get('qty')}주"
@@ -217,14 +231,17 @@ def _settle(conn, symbol) -> None:
     trader._resolve_open_orders(conn, market=MARKET, ticker=symbol, status_fn=status_fn, cancel_fn=None)
 
 
-def _print_followup() -> None:
+def _print_followup(market: bool = False) -> None:
     print("--- 다음 확인 (docs/manual_checks.md 5절) ---")
-    print("KIS 모의 앱의 주문 내역에서 확인하세요: 접수됨 / 지정가로 보임 / 가격·수량이 위와 같음 / 거절 응답 없음")
+    if market:
+        print("KIS 모의 앱의 주문 내역에서 확인하세요: 접수됨 / 시장가로 보임 / 수량이 위와 같음 / 체결가가 표시됨 / 거절 응답 없음")
+    else:
+        print("KIS 모의 앱의 주문 내역에서 확인하세요: 접수됨 / 지정가로 보임 / 가격·수량이 위와 같음 / 거절 응답 없음")
     print("체결되지 않았다면 앱에서 직접 취소하세요(이 봇에는 국내 취소가 구현돼 있지 않습니다).")
     print("취소하거나 체결된 뒤에는 python -m manual_order settle 로 DB 를 맞추고, 봇(main.py)은 그 뒤에 켜세요.")
 
 
-def _after_send(conn, symbol, order_id) -> int:
+def _after_send(conn, symbol, order_id, market: bool = False) -> int:
     print(f"주문 기록 #{order_id}: 전송했고 서버가 접수 응답을 줬습니다(체결 여부는 별개입니다).")
     try:
         _settle(conn, symbol)
@@ -235,7 +252,7 @@ def _after_send(conn, symbol, order_id) -> int:
     except Exception as e:
         print(f"주문은 전송됐지만 상태를 읽지 못했습니다({exc_summary(e)}) — KIS 모의 앱에서 확인하세요. 다시 보내지 마세요.")
         return 2
-    _print_followup()
+    _print_followup(market=market)
     if mine is not None and (mine.get("status") == "UNKNOWN" or not mine.get("broker_order_no")):
         print("주의: 주문번호가 없거나 상태가 UNKNOWN 입니다 — KIS 모의 앱에서 직접 확인하세요. 다시 보내지 마세요.")
         return 2
@@ -254,6 +271,7 @@ def _run(args, conn) -> int:
         return 0
 
     side = "BUY" if args.command == "buy" else "SELL"
+    market = bool(getattr(args, "market", False))
     qty = config.MANUAL_ORDER_MAX_QTY
     in_window = market_calendar.is_order_window(market_calendar.MARKET_KRX, db.now_kst())
     gate, gate_detail = risk.gate_status(conn)
@@ -266,15 +284,16 @@ def _run(args, conn) -> int:
     reasons = refusal_reasons(
         side=side, qty=qty, is_mock=config.IS_MOCK, db_mode_error=mode_error, in_order_window=in_window,
         gate=gate, gate_detail=gate_detail, price=price, position=position,
-        broker_qty=balance.get("quantity"), cash_krw=balance.get("cash_krw"), open_orders=open_orders,
+        broker_qty=balance.get("quantity"), cash_krw=balance.get("cash_krw"), open_orders=open_orders, market=market,
     )
     if reasons:
         _print_refusal(reasons)
         return 1
 
-    # 주문 본문은 한 번만 만든다 — 화면에 보인 것이 그대로 전송된다. 전역 ORDER_TYPE 은 따르지 않고 항상 지정가다.
-    body = kd.order_body(symbol, qty, float(price), side=side, order_type="limit")
-    problem = body_error(body, symbol, qty)
+    # 주문 본문은 한 번만 만든다 — 화면에 보인 것이 그대로 전송된다. 전역 ORDER_TYPE 은 따르지 않는다. --market 이 없으면 항상 지정가다.
+    order_type = "market" if market else "limit"
+    body = kd.order_body(symbol, qty, float(price), side=side, order_type=order_type)
+    problem = body_error(body, symbol, qty, market=market)
     if problem:
         print(f"거부: 주문 본문 검증 실패 — {problem}. 아무것도 보내지 않았습니다.")
         return 1
@@ -283,17 +302,18 @@ def _run(args, conn) -> int:
     _print_preview(side=side, symbol=symbol, qty=qty, price=price, limit_price=limit_price,
                    ord_dvsn=body["ORD_DVSN"], tr_id=tr_id, in_window=in_window, gate=gate,
                    open_count=len(open_orders), cash=balance.get("cash_krw"),
-                   broker_qty=balance.get("quantity"), position=position)
+                   broker_qty=balance.get("quantity"), position=position, market=market)
 
     if not args.send:
         print("미리보기입니다. 아무것도 보내지 않았습니다.")
-        print(f"보내려면: python -m manual_order {args.command} --send")
+        flag = " --market" if market else ""
+        print(f"보내려면: python -m manual_order {args.command}{flag} --send")
         return 0
 
     if not _is_tty():
         print("거부: 터미널에서 직접 실행해야 합니다(입력이 터미널에 연결돼 있지 않습니다). 아무것도 보내지 않았습니다.")
         return 1
-    phrase = confirm_phrase(side, symbol, qty, limit_price)
+    phrase = confirm_phrase(side, symbol, qty, limit_price, market=market)
     timeout = config.MANUAL_ORDER_CONFIRM_TIMEOUT_SEC
     print("봇(main.py)이 실행 중이면 먼저 끄세요. 이 주문은 재시도되지 않습니다.")
     print(f"보내려면 {timeout}초 안에 아래 문장을 그대로 입력하세요(Ctrl+C 로 취소):")
@@ -314,11 +334,12 @@ def _run(args, conn) -> int:
         print(f"거부: {late}. 아무것도 보내지 않았습니다.")
         return 1
 
-    logger.info(f"[수동주문] 전송 요청 {side} {symbol} {qty}주 @ {limit_price} (확인 문장 입력됨)")
+    price_text = "시장가" if market else f"@ {limit_price}"
+    logger.info(f"[수동주문] 전송 요청 {side} {symbol} {qty}주 {price_text} (확인 문장 입력됨)")
     try:
         order_id = trader._submit_order(
             conn, market=MARKET, ticker=symbol, side=side, qty=qty, price=float(limit_price),
-            order_type="LIMIT", reason=REASON,
+            order_type="MARKET" if market else "LIMIT", reason=REASON,
             make_body=lambda: body,
             send=lambda b, on_uncertain: kd.send_order(b, side=side, on_uncertain=on_uncertain),
         )
@@ -332,7 +353,7 @@ def _run(args, conn) -> int:
         print(f"실패: 주문 전송 중 오류가 났습니다({exc_summary(e)}). 서버가 받았는지 알 수 없습니다 — "
               "재전송하지 말고 KIS 모의 앱과 python -m manual_order settle 로 확인하세요.")
         return 2
-    return _after_send(conn, symbol, order_id)
+    return _after_send(conn, symbol, order_id, market=market)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -344,12 +365,17 @@ def _build_parser() -> argparse.ArgumentParser:
     for name, text in (("buy", "1주 지정가 매수 시험 주문"), ("sell", "봇이 산 포지션 1주 지정가 매도 시험 주문")):
         sp = sub.add_parser(name, help=text)
         sp.add_argument("--send", action="store_true", help="미리보기 뒤 확인 문장을 입력하면 실제로 전송한다")
+        sp.add_argument("--market", action="store_true",
+                        help="시장가로 낸다(sell 에서만 허용, 가격 지정 없음). 없으면 항상 지정가")
     sub.add_parser("settle", help="미확정 주문을 한 번 조회해 체결을 DB 에 반영한다(주문은 내지 않는다)")
     return parser
 
 
 def main(argv=None, conn=None) -> int:
     args = _build_parser().parse_args(argv)
+    if getattr(args, "market", False) and args.command != "sell":
+        print("거부: 시장가(--market)는 sell 에서만 쓸 수 있습니다. 아무것도 보내지 않았습니다.")
+        return 1
     if config.IS_MOCK is not True:
         print("거부: 모의투자 모드가 아닙니다 — 이 도구는 모의투자에서만 동작합니다. DB·API 에 접속하지 않았습니다.")
         return 1
