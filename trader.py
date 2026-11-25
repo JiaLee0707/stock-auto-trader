@@ -363,11 +363,16 @@ def _apply_fill_to_position(conn, *, market: str, ticker: str, side: str,
         return
 
     existing = db.get_position(conn, ticker, market)
+    # 재진입(T09e): 이전 포지션이 끝난 행(CLOSED, 또는 수량 0)은 새 진입이다. `close_position` 이 이력 보존을 위해
+    # 진입 시각·진입 신호·고점을 남겨 두므로 그대로 이어받으면 보유 거래일(시간청산)과 트레일링 고점이 옛 진입 기준이 된다.
+    # 분할 매수·부분 매도처럼 열려 있는 포지션은 첫 진입의 값을 이어받는다.
+    reentry = existing is not None and (existing.get("status") == "CLOSED" or prev_qty <= 0)
+    carried = {} if reentry else (existing or {})
     db.upsert_position(
         conn, ticker, market, qty=new_qty, avg_price=new_avg,
-        entry_time=(existing or {}).get("entry_time") or db.now_iso(),
-        entry_signal=(existing or {}).get("entry_signal") or entry_signal,
-        peak_price_since_entry=(existing or {}).get("peak_price_since_entry"),
+        entry_time=carried.get("entry_time") or db.now_iso(),
+        entry_signal=carried.get("entry_signal") or entry_signal,
+        peak_price_since_entry=carried.get("peak_price_since_entry"),
         status="OPEN",
     )
     logger.info(f"[포지션] {market} {ticker} {new_qty:g}주 @ {new_avg:,.2f} — OPEN (체결 반영)")
